@@ -1,0 +1,33 @@
+{
+  "name": "sewage-storm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Three-player co-op survival in the underdark. Milestone 0: server-authoritative movement.",
+  "scripts": {
+    "dev": "concurrently -n server,client -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "tsx watch src/server/index.ts",
+    "dev:client": "vite",
+    "bot": "tsx src/bot/index.ts",
+    "typecheck": "tsc --noEmit",
+    "build": "tsc --noEmit && vite build",
+    "start": "tsx src/server/index.ts",
+    "verify": "tsx src/tools/verifyDeterminism.ts"
+  },
+  "dependencies": {
+    "@colyseus/core": "^0.15.57",
+    "@colyseus/schema": "^2.0.35",
+    "@colyseus/ws-transport": "^0.15.0",
+    "colyseus.js": "^0.15.26",
+    "express": "^4.19.2",
+    "phaser": "^3.80.1",
+    "ws": "^8.17.0"
+  },
+  "devDependencies": {
+    "@types/express": "^4.17.21",
+    "@types/node": "^20.14.0",
+    "concurrently": "^8.2.2",
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.5",
+    "vite": "^6.4.3"
+  }
+}

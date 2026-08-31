@@ -1,0 +1,287 @@
+{
+  "_comment": "Single source of truth for every tunable number. The server reads this from disk at boot and ships it to clients on join, so you can edit it and restart the server without rebuilding the client. Values marked M1+ are not read by any code yet; they are here so the numbers live in one place from day one.",
+  "net": {
+    "tickHz": 30,
+    "patchHz": 20,
+    "maxCommandsPerTick": 4,
+    "interpDelayMs": 100
+  },
+  "arena": {
+    "width": 1600,
+    "height": 1200,
+    "padding": 24
+  },
+  "_livesComment": "extraLives is a single pool shared by the whole party, spent by pressing special while downed or dead. It refills only when a wipe restarts the run, never between levels. Nobody standing is a loss ONLY once this reaches zero — otherwise the level would end before anyone could press the button.",
+  "level": {
+    "extraLives": 3,
+    "durationSec": 45,
+    "_countdownComment": "Seconds between a level being started and sewage beginning to fly. The town is already rebuilt and everyone is on their spawn during it, so it is time to get your bearings rather than dead air. It is NOT part of durationSec — levelEndTick is set when the countdown ends.",
+    "countdownSec": 3,
+    "intermissionSec": 5,
+    "choiceTimeoutSec": 30,
+    "_dmComment": "With a Dungeon Master connected, levels wait for them to press start. With none connected, they start on their own regardless of this key, which is what keeps solo play and the bot soak working.",
+    "requireDmToStart": true,
+    "perkOfferCount": 3,
+    "allThreeDownedIsLoss": true,
+    "deathPersistsAcrossLevels": true,
+    "healToFullBetweenLevels": true,
+    "seed": 1337
+  },
+  "player": {
+    "radius": 18,
+    "maxPlayers": 3,
+    "hitInvulnSec": 0.6,
+    "startHealth": 100
+  },
+  "downed": {
+    "skullsToDie": 3,
+    "skullsPerAsteroidHit": 1,
+    "crawlSpeedMultiplier": 0.4,
+    "resetSkullsOnRevive": true,
+    "reviveSeconds": 5,
+    "reviveRadius": 60,
+    "reviveDecayMultiplier": 2,
+    "reviverMayUseAbilities": false,
+    "revivedHealthFraction": 0.5,
+    "revivedInvulnSec": 1
+  },
+  "characters": {
+    "ranger": {
+      "displayName": "Ranger",
+      "color": "#4ade80",
+      "maxHealth": 100,
+      "speed": 265,
+      "accel": 14,
+      "dash": {
+        "speed": 900,
+        "durationSec": 0.14,
+        "cooldownSec": 2.5,
+        "invulnerable": false
+      },
+      "attack": {
+        "kind": "ranged",
+        "_cooldownComment": "Deliberately double the melee cooldown: the bow trades rate for range.",
+        "cooldownSec": 0.6,
+        "projectileSpeed": 720,
+        "projectileRadius": 6,
+        "maxRange": 720,
+        "splitsLarge": true,
+        "destroysSmall": true,
+        "consumedOnHit": true,
+        "passesThroughAllies": true,
+        "passesThroughBubble": true
+      },
+      "special": {
+        "kind": "grapple",
+        "cooldownSec": 15,
+        "rootsCaster": true,
+        "hookSpeed": 1150,
+        "maxRange": 620,
+        "pullSpeed": 780,
+        "cancelOnDamage": true,
+        "cooldownOnMiss": true,
+        "asteroidAnchorDetonates": true,
+        "anchorLostVelocityDecaySec": 0.25,
+        "harpoonBlastRadius": 140
+      }
+    },
+    "druid": {
+      "displayName": "Druid",
+      "color": "#a78bfa",
+      "maxHealth": 140,
+      "speed": 235,
+      "accel": 11,
+      "passiveRegenPerSec": 1.5,
+      "dash": {
+        "speed": 820,
+        "durationSec": 0.16,
+        "cooldownSec": 3.0,
+        "invulnerable": false
+      },
+      "attack": {
+        "kind": "melee",
+        "cooldownSec": 0.3,
+        "reach": 74,
+        "arcDegrees": 100,
+        "windupSec": 0.1,
+        "activeSec": 0.12,
+        "splitsLarge": true,
+        "destroysSmall": true,
+        "passesThroughAllies": true
+      },
+      "special": {
+        "kind": "swallow",
+        "cooldownSec": 15,
+        "cooldownStartsOnRelease": true,
+        "durationSec": 5,
+        "grabRadius": 52,
+        "capacity": 1,
+        "passengerRegenPerSec": 4,
+        "passengerInvulnerable": true,
+        "passengerLosesInput": true,
+        "canSwallowDowned": true,
+        "swallowingDownedBlocksSkulls": true,
+        "swallowingDoesNotRevive": true,
+        "releaseInvulnSec": 0.5,
+        "releaseOnDruidDeath": true
+      }
+    },
+    "warlock": {
+      "displayName": "Warlock",
+      "color": "#f87171",
+      "maxHealth": 120,
+      "speed": 245,
+      "accel": 12,
+      "dash": {
+        "speed": 860,
+        "durationSec": 0.15,
+        "cooldownSec": 2.8,
+        "invulnerable": false
+      },
+      "attack": {
+        "kind": "melee",
+        "cooldownSec": 0.3,
+        "reach": 96,
+        "arcDegrees": 150,
+        "windupSec": 0.14,
+        "activeSec": 0.14,
+        "splitsLarge": true,
+        "destroysSmall": true,
+        "passesThroughAllies": true
+      },
+      "special": {
+        "kind": "throne",
+        "cooldownSec": 15,
+        "durationSec": 3,
+        "rootsCaster": true,
+        "casterInvulnerable": true,
+        "bubbleRadiusPlayerWidths": 3,
+        "bubbleBlocksAsteroids": true,
+        "bubbleBlocksPlayers": false,
+        "bubbleBlocksProjectiles": false,
+        "reflectedSewageHurtsAllies": true,
+        "reflectPreservesSpeed": true
+      }
+    }
+  },
+  "_wavesComment": "A wave is a spawn window followed by a lull. Nothing new spawns during a lull, but chunks already in the air keep flying, so the arena drains rather than snapping clean. lullSec is deliberately a plain knob: 0 removes lulls entirely, and shortening it below downed.reviveSeconds makes unaided revives impossible on purpose.",
+  "waves": {
+    "countPerLevel": 4,
+    "spawnSec": 8,
+    "lullSec": 3,
+    "intensityPerWave": 1.25
+  },
+  "asteroids": {
+    "large": {
+      "radius": 34,
+      "speedMin": 190,
+      "speedMax": 300,
+      "playerDamage": 34,
+      "wallDamage": 3,
+      "skullsWhenDowned": 1
+    },
+    "small": {
+      "radius": 17,
+      "speedMin": 230,
+      "speedMax": 360,
+      "playerDamage": 16,
+      "wallDamage": 1,
+      "skullsWhenDowned": 1
+    },
+    "split": {
+      "childCount": 2,
+      "_spreadComment": "Measured off the direction away from whoever struck the chunk, not off the chunk's heading. 90 sends fragments perpendicular to the attacker so neither can come back at them; lower angles them further away; above 90 aims them at the attacker.",
+      "spreadDegrees": 90,
+      "speedMultiplier": 1.15,
+      "childrenImmuneToSameSwing": true
+    },
+    "consumedOnPlayerHit": true,
+    "consumedOnWallHit": true,
+    "_spawnRampComment": "speed and interval both scale with the level number, compounding. Level 1 runs at speedStartMul and the interval keys as written; every level after multiplies speed by speedPerLevel (capped at speedMaxMul so sewage never outruns what a player can read) and divides the interval by intervalPerLevel. rampSec must stay at or below waves.spawnSec or the within-wave ramp never completes and intervalMinSec becomes a number nothing reaches.",
+    "spawn": {
+      "intervalStartSec": 0.86,
+      "intervalMinSec": 0.26,
+      "rampSec": 8,
+      "speedStartMul": 0.5,
+      "speedPerLevel": 1.08,
+      "speedMaxMul": 1.75,
+      "intervalPerLevel": 1.06,
+      "largeChance": 0.45,
+      "offscreenMargin": 80,
+      "aimJitterDegrees": 22,
+      "targetInset": 0.18,
+      "maxAlive": 90
+    },
+    "collideWithEachOther": false
+  },
+  "_structuresComment": "townWidth/townHeight are the centred box every structure is placed inside, which leaves open ground all the way around the town. That ring is where you stand to intercept sewage before it reaches a house, so widening the town narrows the only place the interception game happens. The box must stay inset from the arena by at least padding + minGap or townBox() throws.",
+  "structures": {
+    "townWidth": 1000,
+    "townHeight": 720,
+    "hut": {
+      "hp": 60,
+      "width": 96,
+      "height": 96
+    },
+    "wall": {
+      "hp": 42,
+      "width": 128,
+      "height": 32
+    },
+    "hutCount": 7,
+    "wallCount": 9,
+    "minGap": 56,
+    "spawnClearRadius": 90,
+    "repairableBetweenLevels": false
+  },
+  "_bossComment": "Levels named in `levels` replace their waves with a boss fight. The level is won by killing it and lost if the timer runs out with it alive, so durationSec here replaces level.durationSec on those levels. difficulty is the DM's live slider: it scales the Clog's speed and the Wellspring's healing, is clamped to [difficultyMin, difficultyMax], and can be moved mid-fight. The hp values below are for ONE player: each extra player present when the boss spawns adds hpPerExtraPlayer of that again, so a boss is not trivial for three and impossible for one.",
+  "boss": {
+    "levels": [10, 20],
+    "hpPerExtraPlayer": 1,
+    "durationSec": 120,
+    "difficultyMin": 0.25,
+    "difficultyMax": 3,
+    "meleeDamage": 6,
+    "arrowDamage": 4,
+    "grappleDamage": 40,
+    "devourDamage": 30,
+    "reckoningDamage": 60,
+    "clog": {
+      "hp": 2400,
+      "_radiusComment": "Twice a Large chunk's diameter across. Must stay even: pixels.ts bakes the sprite at radius*2/PIXEL art pixels, and an odd diameter would put the art on a half-pixel grid.",
+      "radius": 136,
+      "speed": 34,
+      "shedSec": 1.1,
+      "phaseAtHealthFraction": 0.5,
+      "phaseSpeedMul": 1.5,
+      "phaseShedMul": 0.6,
+      "razeSec": 3
+    },
+    "wellspring": {
+      "hp": 3000,
+      "radius": 56,
+      "pumpSec": 0.7,
+      "pumpCount": 2,
+      "healPerStructureLost": 150
+    }
+  },
+  "_scoreComment": "One party score for the whole run. Each cleared level awards (perChunkDestroyed x sewage destroyed + perHutStanding x huts + perWallStanding x walls left standing) x a multiplier of 1 + levelMulStep x (level - 1), so level 1 pays 1x, level 2 pays 1.25x and level 10 pays 3.25x. A hut is worth three walls: the huts are the town you are defending, the walls are cover that happens to be destructible. Both sides compute it with scoreForLevel in src/shared/score.ts; do not do this arithmetic anywhere else.",
+  "score": {
+    "perBossKill": 5000,
+    "perChunkDestroyed": 10,
+    "perHutStanding": 150,
+    "perWallStanding": 50,
+    "levelMulStep": 0.25
+  },
+  "friendlyFire": {
+    "sewage": true,
+    "reflectedSewage": true,
+    "arrows": false,
+    "melee": false
+  },
+  "debug": {
+    "allowStructureDamage": false,
+    "damageReach": 70,
+    "allowHealthReset": true
+  }
+}
