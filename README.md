@@ -48,7 +48,9 @@ The lull between waves is shorter than a revive takes, so picking somebody up un
 
 Nobody standing loses the level **once those lives are gone** — while any remain, the storm keeps coming and somebody has to decide to spend one. Anyone still on their feet when the timer runs out wins it.
 
-Two ports, two jobs. `5173` (Vite) serves the web page — this is the one you open in a browser. `2567` (Colyseus) is the WebSocket game server that page connects to; opening it directly just tells you to go to 5173.
+Two ports **in development**, two jobs. `5173` (Vite) serves the web page — this is the one you open in a browser. `2567` (Colyseus) is the WebSocket game server that page connects to; opening it directly just tells you to go to 5173.
+
+**Deployed, it is one port.** `npm run build` writes the client to `dist/client`, and the server serves it from that same port alongside the WebSocket — so `npm start` is the whole thing running. See "Deploying it" below.
 
 If 5173 does not load, run the two halves in separate terminals so a Vite startup error is not buried in `concurrently`'s interleaved output:
 
@@ -67,6 +69,36 @@ Other scripts:
 | `npm run typecheck` | `tsc --noEmit` |
 | `npm run build` | Typecheck, then build the client to `dist/client` |
 | `npm start` | Server only, no watcher |
+
+## Deploying it
+
+One process, one port, no reverse proxy and nothing to configure at build time.
+
+```bash
+git clone https://github.com/gcastanon/shitstorm.git
+cd shitstorm
+npm install          # NOT --omit=dev: npm start runs through tsx, a devDependency
+npm run build        # typechecks, then writes dist/client
+npm start            # serves the game and the WebSocket on 2567
+```
+
+Then open `http://your-server:2567/`.
+
+Three things worth knowing:
+
+- **`tuning.json` is read from the working directory**, so run it from the repo root. A service file needs `WorkingDirectory=`.
+- **The client finds the server by itself.** The page and the socket share an origin, so `wss:` is used automatically whenever the page came over `https:`. `VITE_SERVER` still overrides it if you want a local client pointed at a remote server.
+- **`PORT` is honoured**, and `/health` returns `{"ok":true}` for a load balancer.
+
+For TLS, put any terminating proxy in front and forward everything to 2567 — there is no path splitting to get wrong, because it is all one origin. With Caddy that is two lines:
+
+```
+game.example.com {
+    reverse_proxy localhost:2567
+}
+```
+
+Rooms live in memory and fill to 3 players before spilling into a new one *in the same process*. That means one box, no clustering, and a restart drops everyone mid-run.
 
 ## Layout
 

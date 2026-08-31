@@ -50,7 +50,7 @@ Do not re-derive these the hard way.
 
 - **Do not run `npm audit fix --force`.** It upgrades Colyseus to 0.18 across three major versions and breaks the schema callback API. The remaining 3 advisories are all `nanoid@2` under `@colyseus/core`, and all three require an attacker-controlled `size` argument. Colyseus calls `generateId()` zero-arg at all 15 call sites. Unreachable. Revisit around M4.
 
-- **Two ports.** `5173` (Vite) serves the page; `2567` (Colyseus) is WebSocket only. Opening 2567 in a browser now returns a page saying so.
+- **Two ports in development, one in production.** `5173` (Vite) serves the page and `2567` (Colyseus) is the game server. **When `dist/client` exists, the server serves it from 2567 as well**, so a deployment is one process on one port — and the client derives its endpoint from `location`, which means `wss:` comes for free on an HTTPS page and nothing is baked in at build time. That last part matters: the old hardcoded `ws://host:2567` was silently blocked as mixed content by any browser on an HTTPS page, which is a failure with no error message in the game. `import.meta.env.DEV` is what tells the two cases apart, so `vite dev` still reaches across to 2567.
 
 - **Reconcile has to rewind `prevButtons`, not just the numbers.** Abilities fire on a rising edge, so the edge detector's previous-buttons value is simulation state like any other. At reconcile time the client's copy holds the buttons from its *newest* command, which is ahead of the state being snapped to; replaying from there makes the first replayed press look like a held button and silently eats a dash. `Predictor.reconcile` rewinds it to the buttons of the last command the server actually acked. Anything else edge-triggered in M4 has the same problem.
 

@@ -4,7 +4,24 @@ import { ArenaScene } from "./ArenaScene";
 import { CHARACTER_IDS } from "../shared/types";
 import { renderControls } from "./input";
 
-const ENDPOINT = import.meta.env.VITE_SERVER ?? `ws://${location.hostname}:2567`;
+/**
+ * Where the game server is.
+ *
+ * In a build, the server serves this page, so the WebSocket is the same origin:
+ * same host, same port, and `wss:` whenever the page came over `https:`. That is
+ * what lets a deployment be one process on one port with nothing configured at
+ * build time — and it fixes the trap where a page served over HTTPS silently
+ * refused a hardcoded `ws://` as mixed content.
+ *
+ * Under `vite dev` the page is on 5173 and the server is not, so that one case
+ * has to be told. VITE_SERVER still overrides both, for pointing a local client
+ * at a remote server.
+ */
+const ENDPOINT = import.meta.env.VITE_SERVER ?? (
+  import.meta.env.DEV
+    ? `ws://${location.hostname}:2567`
+    : `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}`
+);
 
 const menu = document.getElementById("menu")!;
 const status = document.getElementById("status")!;
