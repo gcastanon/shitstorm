@@ -3,6 +3,7 @@ import type { Client } from "@colyseus/core";
 import {
   GameState, Player, Structure, Asteroid, addStat, resetStats,
   OUTCOME_PLAYING, OUTCOME_WON, OUTCOME_LOST, OUTCOME_WAITING, OUTCOME_COUNTDOWN,
+  OUTCOME_VICTORY,
 } from "./GameState";
 import { ReviveSystem } from "./ReviveSystem";
 import { LIFE_ALIVE, LIFE_DEAD, LIFE_DOWNED } from "../shared/types";
@@ -18,7 +19,7 @@ import { mulberry32, isStanding } from "../shared/structures";
 import { scoreForLevel } from "../shared/score";
 import { BossSystem } from "./BossSystem";
 import { BOSS_CLOG, BOSS_NONE } from "../shared/types";
-import { nextBossLevel } from "../shared/boss";
+import { isFinalBossLevel, nextBossLevel } from "../shared/boss";
 
 /** Hit points one Salvage trigger puts back into a damaged structure. */
 const SALVAGE_REPAIR = 10;
@@ -512,6 +513,8 @@ export class ArenaRoom extends Room<GameState> {
     // Settle what a start would begin right away rather than at awaitStart, so
     // the Dungeon Master's button reads "Start level 4" the moment level 3 ends
     // instead of offering level 3 again while the perks are being picked.
+    // A victory ends the run like a wipe does — the next thing played is a new
+    // run from level 1 — it just ends it the good way.
     this.state.pendingLevel = outcome === OUTCOME_WON ? this.state.level + 1 : 1;
 
     // A skip the DM armed during the level wins over both of those, including
@@ -544,7 +547,18 @@ export class ArenaRoom extends Room<GameState> {
       this.dealOffers();
     }
 
-    const label = outcome === OUTCOME_WON ? "WON" : "LOST";
+    // A victory scores the final level but offers no perks: there is no next
+    // level to spend them on, and the screen belongs to the banner.
+    if (outcome === OUTCOME_VICTORY) {
+      this.state.intermissionEndTick =
+        this.state.tick + secToTicks(this.tuning.level.victoryHoldSec, this.tuning);
+      this.awardScore();
+      console.log(`[arena ${this.roomId}] RUN COMPLETE — final score ${this.state.score}`);
+    }
+
+    const label = outcome === OUTCOME_WON ? "WON"
+      : outcome === OUTCOME_VICTORY ? "RUN COMPLETE"
+      : "LOST";
     console.log(`[arena ${this.roomId}] level ${this.state.level} ${label} at tick ${this.state.tick}: ${why}`);
   }
 
@@ -596,7 +610,12 @@ export class ArenaRoom extends Room<GameState> {
     // of chunks, and quietly adding one for a boss would make that column lie.
     void by;
     console.log(`[arena ${this.roomId}] ${this.state.boss.kind} destroyed at tick ${this.state.tick}`);
-    this.endLevel(OUTCOME_WON, `${this.state.boss.kind} destroyed`);
+
+    // Killing the last boss in the list finishes the run rather than rolling on
+    // into level 21. The level is scored either way inside endLevel, so the
+    // number on the victory screen includes the boss they just put down.
+    const final = isFinalBossLevel(this.tuning, this.state.level);
+    this.endLevel(final ? OUTCOME_VICTORY : OUTCOME_WON, `${this.state.boss.kind} destroyed`);
   }
 
   /**
@@ -780,6 +799,8 @@ export class ArenaRoom extends Room<GameState> {
       return;
     }
 
+    // Victory and a wipe share this tail: both end the run, both hold their
+    // banner for a while, and both queue a fresh run from level 1.
     if (this.state.tick < this.state.intermissionEndTick) return;
     this.awaitStart(1);
   }

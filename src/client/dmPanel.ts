@@ -1,5 +1,6 @@
 import {
-  BOSS_CLOG, OUTCOME_COUNTDOWN, OUTCOME_LOST, OUTCOME_PLAYING, OUTCOME_WAITING, OUTCOME_WON,
+  BOSS_CLOG, OUTCOME_COUNTDOWN, OUTCOME_LOST, OUTCOME_PLAYING, OUTCOME_VICTORY,
+  OUTCOME_WAITING, OUTCOME_WON,
 } from "../shared/types";
 import { formatScore } from "../shared/score";
 import { nextBossLevel } from "../shared/boss";
@@ -76,8 +77,11 @@ export class DmPanel {
     // Hidden while playing, and hidden through the countdown too: those three
     // seconds are when the arena is worth looking at, and a summary table of the
     // level that just ended would be covering it.
+    // Also stands down for the victory screen — the DM watched them earn it and
+    // should get to see it rather than a summary table over the top of it.
     const showing = this.net.outcome !== OUTCOME_PLAYING
-      && this.net.outcome !== OUTCOME_COUNTDOWN;
+      && this.net.outcome !== OUTCOME_COUNTDOWN
+      && this.net.outcome !== OUTCOME_VICTORY;
     if (!showing) {
       this.rendered = "";
       this.root.classList.remove("show");

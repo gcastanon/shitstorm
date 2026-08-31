@@ -37,6 +37,11 @@ export const OUTCOME_WAITING = 3;
  * without any of them being touched.
  */
 export const OUTCOME_COUNTDOWN = 4;
+/**
+ * The last boss is dead and the run is finished. Another value on the same
+ * field, so it inherits the world freeze and the hidden timer bar like the rest.
+ */
+export const OUTCOME_VICTORY = 5;
 
 /**
  * Which boss a level is running, or BOSS_NONE for an ordinary level of waves.

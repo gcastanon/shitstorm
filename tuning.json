@@ -18,6 +18,8 @@
     "_countdownComment": "Seconds between a level being started and sewage beginning to fly. The town is already rebuilt and everyone is on their spawn during it, so it is time to get your bearings rather than dead air. It is NOT part of durationSec — levelEndTick is set when the countdown ends.",
     "countdownSec": 3,
     "intermissionSec": 5,
+    "_victoryComment": "How long the YOU WON banner holds before the room queues a fresh run. Long, because it is the only thing in the game anybody is ever going to want to sit and look at.",
+    "victoryHoldSec": 20,
     "choiceTimeoutSec": 30,
     "_dmComment": "With a Dungeon Master connected, levels wait for them to press start. With none connected, they start on their own regardless of this key, which is what keeps solo play and the bot soak working.",
     "requireDmToStart": true,
@@ -50,7 +52,7 @@
       "displayName": "Ranger",
       "color": "#4ade80",
       "maxHealth": 100,
-      "speed": 265,
+      "speed": 212,
       "accel": 14,
       "dash": {
         "speed": 900,
@@ -89,7 +91,7 @@
       "displayName": "Druid",
       "color": "#a78bfa",
       "maxHealth": 140,
-      "speed": 235,
+      "speed": 188,
       "accel": 11,
       "passiveRegenPerSec": 1.5,
       "dash": {
@@ -130,7 +132,7 @@
       "displayName": "Warlock",
       "color": "#f87171",
       "maxHealth": 120,
-      "speed": 245,
+      "speed": 196,
       "accel": 12,
       "dash": {
         "speed": 860,

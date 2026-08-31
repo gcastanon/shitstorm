@@ -443,4 +443,5 @@ export class GameState extends Schema {
 
 export {
   OUTCOME_PLAYING, OUTCOME_WON, OUTCOME_LOST, OUTCOME_WAITING, OUTCOME_COUNTDOWN,
+  OUTCOME_VICTORY,
 } from "../shared/types";

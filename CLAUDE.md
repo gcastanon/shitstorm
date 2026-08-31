@@ -12,7 +12,7 @@ See @README.md for architecture, netcode explanation, commands, and the full des
 
 1. **Playtest.** Nothing has been played by a human for several features now — perks, music, the timer bar and the safe-split change have all only been driven headlessly and in a scripted browser.
 2. **The tuning pass.** Deferred by decision, described below, with sweep tables already measured so it can be quick.
-3. Optional leftovers: a generated bitmap font for the outcome banner (the last smooth text in a chunky game), hut variety, and `/run-skill-generator` to capture the browser recipe below as a real project skill.
+3. Optional leftovers: hut variety, and `/run-skill-generator` to capture the browser recipe below as a real project skill. (The bitmap font that used to be listed here exists now — see the victory banner section.)
 
 **One balance pass has now happened**, on knobs the designer named directly — level length, sewage speed and rate, and the difficulty ramp across a run. See the extra-lives section near the end. The broader sweep below is still deferred. The mechanics were built first by decision, and the numbers are known to be off — most obviously that the wave rework left cover erosion at zero. Do not re-raise tuning as a blocker or "fix" a number in passing; the sweep tables below exist so the knobs can be turned deliberately when that pass happens. `npx tsx hitcheck.ts` reproduces them.
 
@@ -998,6 +998,54 @@ Both worth remembering, because both looked like passes:
   115/3/82/68/24px per 1.2s on screen and took the town from 16 buildings to 14 — the 3px sample
   is a turn toward a new target, not a stall. At radius 136 its hitbox outline still lands exactly
   on the sprite edge, checked with `H` on.
+
+## Winning the run, and a pixel font at last
+
+### Beating level 20 ends the run
+
+`OUTCOME_VICTORY`, another value on `outcome` so it inherits the world freeze and the hidden
+timer bar like every other one. `isFinalBossLevel` in `src/shared/boss.ts` decides it from the
+last entry in `boss.levels`, so a third boss level later needs no new logic.
+
+The final level is **scored first**, so the number on the banner includes the boss they just put
+down. No perks are dealt — there is no level left to spend them on — and the banner holds for
+`level.victoryHoldSec` before the room queues a fresh run at level 1, which is the wipe path with
+a better feeling attached.
+
+### The banner is the bitmap font this file has wanted for a long time
+
+A 5×7 glyph set (A–Z, 0–9, and a little punctuation) baked one glyph at a time in `pixels.ts`,
+white so it can be tinted. The outcome banner was the last smoothly-antialiased thing in a game
+made of hard 2px squares, and it was the one screen anybody would sit and look at.
+
+**Baked per glyph rather than per string on purpose.** The banner rolls a rainbow along the word
+and runs a sine wave through the letters, and per-letter phase is the whole reason an arcade
+victory screen reads as one. A whole-string texture could not do it.
+
+### Movement is 80% of what it was
+
+`characters.*.speed`: 265/235/245 → 212/188/196, exactly 0.8 each. Crawling follows for free
+since it is a multiple of `speed` — measured 77px/s against a tuned 78.
+
+### A measurement that was really measuring a wall
+
+The speed probe drove each character flat out from the middle of the arena and compared distance
+travelled. All three "measured" 758px however fast they were, because 758px was the distance to
+`clampToArena`. Two of the three passed on tolerance anyway. It now starts hard against the west
+side. **Any probe that drives a player across the arena has to account for the clamp**, or it is
+timing a wall.
+
+### Verified
+
+- `npm run verify` — `0.000000px`.
+- **Speed/victory probe**: all three characters at exactly 0.800 of their old speed and covering
+  the distance that implies; crawl follows; level 10's boss still ends in an ordinary WON that
+  queues level 11 while level 20's ends in VICTORY that queues level 1; the final level is scored
+  and pays its boss bonus; no perk cards are dealt; the banner holds for `victoryHoldSec` and the
+  new run really is fresh.
+- **Browser**: skipped to 10, then 20, killed the Wellspring, and the banner came up — chunky
+  "YOU WON!", the rainbow and the wave both visibly moved between two screenshots a beat apart,
+  "THE STORM IS BEATEN / FINAL SCORE 37,433" underneath, the DM panel standing down for it.
 
 ## Next
 

@@ -26,6 +26,12 @@ export function bossKindFor(t: Tuning, level: number): string {
  * are all behind you — so the button keeps working on a deep run instead of
  * going dead after level 20.
  */
+/** True for the last boss in the list — clearing it finishes the run. */
+export function isFinalBossLevel(t: Tuning, level: number): boolean {
+  const levels = [...t.boss.levels].sort((a, b) => a - b);
+  return levels.length > 0 && level === levels[levels.length - 1];
+}
+
 export function nextBossLevel(t: Tuning, level: number): number {
   const levels = [...t.boss.levels].sort((a, b) => a - b);
   if (levels.length === 0) return level + 1;

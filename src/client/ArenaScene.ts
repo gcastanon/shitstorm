@@ -5,7 +5,7 @@ import { sampleRemote } from "./interp";
 import { Sfx } from "./audio";
 import { EventDiffer, type FxEvent } from "./events";
 import { Fx, FX_BLOOD, FX_HEAL, FX_RUBBLE, FX_SEWAGE, FX_SPARK } from "./fx";
-import { bakeAll, PIXEL, TEX, weaponStyle } from "./pixels";
+import { bakeAll, GLYPH_W, hasGlyph, PIXEL, TEX, weaponStyle } from "./pixels";
 import { PerkScreen } from "./perkScreen";
 import { DmPanel } from "./dmPanel";
 import { applyPerks, meleeSweep, type PerkMods } from "../shared/perks";
@@ -18,7 +18,7 @@ import { formatScore } from "../shared/score";
 import { TIER_LARGE, tierRadius, type Tier } from "../shared/asteroids";
 import {
   BOSS_CLOG, BTN, LIFE_ALIVE, LIFE_DEAD, LIFE_DOWNED,
-  OUTCOME_COUNTDOWN, OUTCOME_PLAYING, OUTCOME_WAITING, OUTCOME_WON,
+  OUTCOME_COUNTDOWN, OUTCOME_PLAYING, OUTCOME_VICTORY, OUTCOME_WAITING, OUTCOME_WON,
   type CharacterId, type InputCommand,
 } from "../shared/types";
 
@@ -96,6 +96,11 @@ const DEPTH = {
 /** Outcome banner text, and the much larger type the countdown uses. */
 const BANNER_SIZE = 44;
 const COUNTDOWN_SIZE = 120;
+
+/** The victory banner's rainbow, rolled one step per letter per frame. */
+const VICTORY_COLOURS = [
+  0xfde047, 0xfb923c, 0xf87171, 0xe879f9, 0xa78bfa, 0x60a5fa, 0x34d399, 0xa3e635,
+];
 
 /**
  * Keyed sprite pool.
@@ -185,6 +190,10 @@ export class ArenaScene extends Phaser.Scene {
   private downedText!: Phaser.GameObjects.Text;
   /** The boss's name and health, on its bar. Hidden on ordinary levels. */
   private bossText!: Phaser.GameObjects.Text;
+  /** The victory word, one pooled sprite per letter. */
+  private victory!: SpritePool;
+  private victoryText!: Phaser.GameObjects.Text;
+  private lastVictoryBurst = 0;
 
   /**
    * In-flight weapon swings, per player.
@@ -314,6 +323,17 @@ export class ArenaScene extends Phaser.Scene {
       .setDepth(10)
       .setVisible(false);
 
+    // Above everything, including the outcome banner it replaces.
+    this.victory = new SpritePool(this, 12);
+    this.victoryText = this.add
+      .text(0, 0, "", {
+        fontFamily: "monospace", fontSize: "26px", color: "#e2e8f0", align: "center",
+      })
+      .setOrigin(0.5)
+      .setDepth(12)
+      .setVisible(false);
+    this.victoryText.setLineSpacing(8);
+
     this.input.keyboard?.on("keydown-P", () => {
       this.predictor.enabled = !this.predictor.enabled;
     });
@@ -381,6 +401,9 @@ export class ArenaScene extends Phaser.Scene {
 
     this.draw();
     this.drawHud();
+    // Drawn after the world so its curtain covers it, and before the banner so
+    // the banner can stand down for it.
+    this.drawVictory();
     this.drawBanner(choosing);
   }
 
@@ -535,7 +558,90 @@ export class ArenaScene extends Phaser.Scene {
     return `waiting on ${names.join(", ")}`;
   }
 
+  /**
+   * The run is over and they won it.
+   *
+   * Drawn from the baked glyph font rather than a Phaser text object, because
+   * this is the one screen anybody will sit and look at and it was the last
+   * smoothly-antialiased thing left in a game made of 2px squares.
+   *
+   * Every letter gets its own phase: a rainbow that rolls along the word and a
+   * bob that runs a wave through it. Per-letter is why the glyphs are baked
+   * individually instead of a string being rendered whole.
+   */
+  private drawVictory(): boolean {
+    if (this.net.outcome !== OUTCOME_VICTORY) {
+      this.victory.begin();
+      this.victory.end();
+      this.victoryText.setVisible(false);
+      return false;
+    }
+
+    const t = this.net.tuning;
+    const now = performance.now() / 1000;
+    const g = this.g;
+
+    // A dark curtain, so the arena behind stops competing.
+    g.fillStyle(0x05030b, 0.82);
+    g.fillRect(0, 0, t.arena.width, t.arena.height);
+
+    this.victory.begin();
+
+    const WORD = "YOU WON!";
+    const scale = PIXEL * 9;
+    const cell = (GLYPH_W + 1) * scale;
+    const cx = t.arena.width / 2;
+    const cy = t.arena.height / 2 - 60;
+    const left = cx - (WORD.length * cell - scale) / 2;
+
+    for (let i = 0; i < WORD.length; i++) {
+      const ch = WORD[i]!;
+      if (!hasGlyph(ch)) continue;
+
+      const sprite = this.victory.get(`v${i}`, TEX.glyph(ch));
+      // The wave and the rainbow run at different rates, so the two never lock
+      // into one repeating pattern.
+      const bob = Math.sin(now * 4 - i * 0.55) * 16;
+      sprite.setPosition(left + i * cell, cy + bob);
+      sprite.setScale(scale);
+      sprite.setOrigin(0, 0.5);
+      sprite.setTint(VICTORY_COLOURS[
+        (Math.floor(now * 8) + i) % VICTORY_COLOURS.length
+      ]!);
+    }
+
+    this.victory.end();
+
+    // Fireworks, from the particle system the splats already use.
+    if (now - this.lastVictoryBurst > 0.28) {
+      this.lastVictoryBurst = now;
+      this.fx.burst(
+        FX_SPARK,
+        120 + Math.random() * (t.arena.width - 240),
+        140 + Math.random() * 320,
+        18,
+      );
+    }
+
+    const left2 = Math.max(
+      0,
+      (this.net.intermissionEndTick - this.net.serverTick) / t.net.tickHz,
+    );
+    this.victoryText.setPosition(cx, cy + 190);
+    this.victoryText.setText(
+      `THE STORM IS BEATEN\nFINAL SCORE  ${formatScore(this.net.score)}\n\nnew run in ${Math.ceil(left2)}s`,
+    );
+    this.victoryText.setVisible(true);
+    return true;
+  }
+
   private drawBanner(choosing = false) {
+    // Victory owns the screen outright.
+    if (this.net.outcome === OUTCOME_VICTORY) {
+      this.banner.setText("");
+      return;
+    }
+
     // Paused beats everything, including a countdown: it is the one state where
     // nothing at all is happening and the reason needs to be on screen.
     if (this.net.pausedBy !== "") {

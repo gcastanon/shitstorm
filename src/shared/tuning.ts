@@ -180,6 +180,8 @@ export interface Tuning {
     /** Seconds between a level being started and sewage flying. Not part of
      *  durationSec — levelEndTick is set when the countdown ends. */
     countdownSec: number;
+    /** How long the victory banner holds before a fresh run is queued. */
+    victoryHoldSec: number;
     seed: number;
     /** One pool shared by the whole party, spent by pressing special while down
      *  or dead. Refilled only when a wipe restarts the run. */

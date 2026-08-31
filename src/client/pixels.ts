@@ -34,6 +34,7 @@ export const TEX = {
   floor: "px-floor",
   outskirts: "px-outskirts",
   boss: (kind: string) => `px-boss-${kind}`,
+  glyph: (ch: string) => `px-glyph-${ch.toUpperCase()}`,
   hut: "px-hut",
   hutRubble: "px-hut-rubble",
   wall: "px-wall",
@@ -234,6 +235,76 @@ function bossTexture(scene: Phaser.Scene, key: string, size: number, wellspring:
     );
   }
   p.bake(key);
+}
+
+/**
+ * A 5x7 pixel font, baked one glyph at a time.
+ *
+ * The outcome banner was the last smooth text in a chunky game — 44px browser
+ * antialiasing over sprites that are all hard 2px squares. Baking glyphs rather
+ * than a whole string means the banner can animate per letter, which is what
+ * makes an arcade victory screen read as one.
+ *
+ * Drawn white so it can be tinted; the colour cycling lives in the scene.
+ */
+const GLYPHS: Record<string, string[]> = {
+  A: [" ### ", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+  B: ["#### ", "#   #", "#   #", "#### ", "#   #", "#   #", "#### "],
+  C: [" ### ", "#   #", "#    ", "#    ", "#    ", "#   #", " ### "],
+  D: ["#### ", "#   #", "#   #", "#   #", "#   #", "#   #", "#### "],
+  E: ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#####"],
+  F: ["#####", "#    ", "#    ", "#### ", "#    ", "#    ", "#    "],
+  G: [" ### ", "#   #", "#    ", "#  ##", "#   #", "#   #", " ### "],
+  H: ["#   #", "#   #", "#   #", "#####", "#   #", "#   #", "#   #"],
+  I: [" ### ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+  J: ["    #", "    #", "    #", "    #", "#   #", "#   #", " ### "],
+  K: ["#   #", "#  # ", "# #  ", "##   ", "# #  ", "#  # ", "#   #"],
+  L: ["#    ", "#    ", "#    ", "#    ", "#    ", "#    ", "#####"],
+  M: ["#   #", "## ##", "# # #", "#   #", "#   #", "#   #", "#   #"],
+  N: ["#   #", "##  #", "# # #", "#  ##", "#   #", "#   #", "#   #"],
+  O: [" ### ", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+  P: ["#### ", "#   #", "#   #", "#### ", "#    ", "#    ", "#    "],
+  Q: [" ### ", "#   #", "#   #", "#   #", "# # #", "#  # ", " ## #"],
+  R: ["#### ", "#   #", "#   #", "#### ", "# #  ", "#  # ", "#   #"],
+  S: [" ####", "#    ", "#    ", " ### ", "    #", "    #", "#### "],
+  T: ["#####", "  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "  #  "],
+  U: ["#   #", "#   #", "#   #", "#   #", "#   #", "#   #", " ### "],
+  V: ["#   #", "#   #", "#   #", "#   #", "#   #", " # # ", "  #  "],
+  W: ["#   #", "#   #", "#   #", "#   #", "# # #", "## ##", "#   #"],
+  X: ["#   #", "#   #", " # # ", "  #  ", " # # ", "#   #", "#   #"],
+  Y: ["#   #", "#   #", " # # ", "  #  ", "  #  ", "  #  ", "  #  "],
+  Z: ["#####", "    #", "   # ", "  #  ", " #   ", "#    ", "#####"],
+  "0": [" ### ", "#   #", "#  ##", "# # #", "##  #", "#   #", " ### "],
+  "1": ["  #  ", " ##  ", "  #  ", "  #  ", "  #  ", "  #  ", " ### "],
+  "2": [" ### ", "#   #", "    #", "   # ", "  #  ", " #   ", "#####"],
+  "3": ["#####", "   # ", "  #  ", "   # ", "    #", "#   #", " ### "],
+  "4": ["   # ", "  ## ", " # # ", "#  # ", "#####", "   # ", "   # "],
+  "5": ["#####", "#    ", "#### ", "    #", "    #", "#   #", " ### "],
+  "6": [" ### ", "#   #", "#    ", "#### ", "#   #", "#   #", " ### "],
+  "7": ["#####", "    #", "   # ", "  #  ", " #   ", " #   ", " #   "],
+  "8": [" ### ", "#   #", "#   #", " ### ", "#   #", "#   #", " ### "],
+  "9": [" ### ", "#   #", "#   #", " ####", "    #", "#   #", " ### "],
+  "!": ["  #  ", "  #  ", "  #  ", "  #  ", "  #  ", "     ", "  #  "],
+  "?": [" ### ", "#   #", "    #", "   # ", "  #  ", "     ", "  #  "],
+  ".": ["     ", "     ", "     ", "     ", "     ", "     ", "  #  "],
+  ",": ["     ", "     ", "     ", "     ", "     ", "  #  ", " #   "],
+  "-": ["     ", "     ", "     ", "#####", "     ", "     ", "     "],
+  ":": ["     ", "  #  ", "     ", "     ", "     ", "  #  ", "     "],
+};
+
+/** Glyph cell, in art pixels. One blank column of spacing is added when drawn. */
+export const GLYPH_W = 5;
+export const GLYPH_H = 7;
+
+/** True if this character has a glyph. Anything else is drawn as a gap. */
+export const hasGlyph = (ch: string) => ch.toUpperCase() in GLYPHS;
+
+function bakeFont(scene: Phaser.Scene) {
+  for (const [ch, rows] of Object.entries(GLYPHS)) {
+    const p = new Pix(scene, GLYPH_W, GLYPH_H);
+    p.art(0, 0, rows, { "#": 0xffffff });
+    p.bake(TEX.glyph(ch));
+  }
 }
 
 /** A character. Same disc as the hitbox, plus a face that never rotates. */
@@ -514,6 +585,8 @@ export function bakeAll(
 
   bossTexture(scene, TEX.boss(BOSS_CLOG), art(sizes.bossClog), false);
   bossTexture(scene, TEX.boss(BOSS_WELLSPRING), art(sizes.bossWellspring), true);
+
+  bakeFont(scene);
 
   hutTexture(scene, TEX.hut, art(sizes.hut.w), false);
   hutTexture(scene, TEX.hutRubble, art(sizes.hut.w), true);
