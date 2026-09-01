@@ -2,6 +2,7 @@ import { GameState, Player } from "./src/server/GameState";
 import { AsteroidSystem } from "./src/server/AsteroidSystem";
 import { generateLayout, isStanding } from "./src/shared/structures";
 import { spawnPoint } from "./src/shared/sim";
+import { TIER_NAMES } from "./src/shared/asteroids";
 import * as fs from "node:fs";
 const base = JSON.parse(fs.readFileSync("tuning.json", "utf8"));
 
@@ -17,11 +18,15 @@ const base = JSON.parse(fs.readFileSync("tuning.json", "utf8"));
  * the body keeps taking hits, because the question being asked is density, not
  * survival.
  */
-function trial(t: any, seed: number, seconds: number) {
+function trial(t: any, seed: number, seconds: number, level = 1) {
   const state = new GameState();
   const boxes = generateLayout(t);
   const sys = new AsteroidSystem(t, state, seed);
   const dt = 1 / t.net.tickHz;
+
+  // Which tiers spawn is a function of the level, so the sweep has to say which
+  // one it is measuring. Level 1 draws exactly what it always drew.
+  state.level = level;
 
   for (let i = 0; i < 3; i++) {
     const p = new Player();
@@ -69,8 +74,10 @@ function trial(t: any, seed: number, seconds: number) {
   if (!sys.spawning) clearPerLull.push(clearTicksThisLull);
 
   const hp = [...state.players.values()].map(p => p.health);
+  const byTier = new Map<number, number>();
+  for (const a of state.asteroids) byTier.set(a.tier, (byTier.get(a.tier) ?? 0) + 1);
   return {
-    hits, firstHitSec, peak, hp,
+    hits, firstHitSec, peak, hp, byTier,
     cover: boxes.filter(isStanding).length, total: boxes.length,
     waves: sys.waveIndex + 1,
     hitsByWave,
@@ -102,3 +109,27 @@ console.log(`  hits by wave:           ${perWave.join("  ")}`);
 console.log(`\n  fully-clear time per lull: ${avg(r=>r.clearSecPerLull)}s of the ${w.lullSec}s lull`);
 console.log(`  revive needs ${base.downed.reviveSeconds}s uninterrupted -> unaided revive ${
   Number(avg(r=>r.clearSecPerLull)) >= base.downed.reviveSeconds ? "FITS" : "DOES NOT FIT"} in a clear window`);
+
+/**
+ * Across the levels where the tier table changes.
+ *
+ * Level 1 is the recorded baseline and must not move. 5 brings the armoured
+ * crust in and 15 the bolus, whose chain — one becomes two Large becomes four
+ * Small — is the thing most likely to disturb `maxAlive`, so peak is printed
+ * against that cap rather than on its own.
+ */
+console.log(`\nby level (8 seeds each, ${SECONDS}s, idle players):`);
+console.log(`  level   hits   peak/${String(base.asteroids.spawn.maxAlive).padEnd(3)} cover      alive at the end, by tier`);
+for (const level of [1, 4, 5, 14, 15, 20]) {
+  const rs = [1,2,3,4,5,6,7,8].map(s => trial(base, s, SECONDS, level));
+  const a = (f:(r:any)=>number) => (rs.reduce((x,r)=>x+f(r),0)/rs.length);
+  const tiers = TIER_NAMES.map((name, i) => {
+    const n = rs.reduce((x, r) => x + (r.byTier.get(i) ?? 0), 0) / rs.length;
+    return n > 0.05 ? `${name} ${n.toFixed(1)}` : "";
+  }).filter(Boolean).join("  ");
+  console.log(
+    `  ${String(level).padStart(5)}   ${a(r=>r.hits).toFixed(1).padStart(4)}` +
+    `   ${a(r=>r.peak).toFixed(1).padStart(5)}   ${a(r=>r.cover).toFixed(1)}/${rs[0]!.total}` +
+    `      ${tiers}`,
+  );
+}

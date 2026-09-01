@@ -122,6 +122,22 @@
       button[data-char="druid"] { --glow: #a78bfa; }
       button[data-char="warlock"] { --glow: #f87171; }
 
+      /* Already taken. The colour is what identifies a seat, so losing it is the
+         clearest possible "not this one" — a dead grey card among lit ones, with
+         the name of whoever has it. The DM chair is a seat like any other, so
+         the same rule covers its button. */
+      #menu button.taken {
+        --glow: #334155;
+        color: #475569; border-color: #334155; border-style: dashed; cursor: not-allowed;
+        background: rgba(10, 7, 20, 0.5);
+        text-shadow: none; box-shadow: none;
+      }
+      #menu button.taken:hover { transform: none; background: rgba(10, 7, 20, 0.5); box-shadow: none; }
+      #menu button.taken small {
+        display: block; margin-top: 6px; font-size: 9px; letter-spacing: 0.1em;
+        color: #64748b; text-transform: none;
+      }
+
       #menu input {
         background: rgba(10, 7, 20, 0.8); border: 1px solid #4c1d95; color: #e9d5ff;
         text-align: center; letter-spacing: 0.18em; padding: 10px 14px; border-radius: 4px;
@@ -234,12 +250,52 @@
       #dm-live label b { color: #fbbf24; font-weight: 600; }
       #dm-live small { font-size: 10px; color: #64748b; line-height: 1.4; }
       #dm-live input[type="range"] { width: 100%; accent-color: #fbbf24; cursor: pointer; }
+      #dm-live .dm-rule { width: 100%; margin: 2px 0; border: 0; border-top: 1px solid #1e293b; }
+
+      /* The roster. One row per connected player, plus a dimmed row per empty
+         seat so "2/3" is visible as a shape and not only as a number. */
+      #dm-roster { display: flex; flex-direction: column; gap: 4px; }
+      .dm-p {
+        display: grid; grid-template-columns: 10px 1fr auto; align-items: center;
+        gap: 7px; font-size: 11px; color: #cbd5e1;
+      }
+      .dm-p .dot { width: 8px; height: 8px; border-radius: 50%; background: #475569; }
+      .dm-p .who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+      .dm-p .who i { font-style: normal; color: #64748b; }
+      .dm-p .cond { font-variant-numeric: tabular-nums; color: #94a3b8; }
+      /* A health bar under the name, on drawHealthBar's colour thresholds so it
+         reads the same as every other health readout in the game. */
+      .dm-p .hp { grid-column: 2 / 4; height: 3px; border-radius: 2px; background: #1e293b; }
+      .dm-p .hp span { display: block; height: 100%; border-radius: 2px; background: #4ade80; }
+      .dm-p.hurt .hp span { background: #fbbf24; }
+      .dm-p.bad .hp span { background: #f87171; }
+      .dm-p.downed .cond { color: #fbbf24; }
+      .dm-p.dead { opacity: 0.45; }
+      .dm-p.dead .cond { color: #f87171; }
+      .dm-p.empty { opacity: 0.35; }
+      .dm-p.empty .cond { color: #64748b; }
+      .dm-p .pick { color: #fbbf24; }
+
+      .dm-skiprow { display: flex; gap: 6px; align-items: stretch; }
+      #dm-skip-level {
+        flex: 1; min-width: 0; padding: 8px 10px; font: inherit; font-size: 12px;
+        background: #0b1120; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px;
+      }
+      #dm-skip-level:focus { outline: none; border-color: #fbbf24; }
       #dm-skip {
-        margin-top: 4px; padding: 8px 10px; font: inherit; font-size: 12px; cursor: pointer;
+        padding: 8px 14px; font: inherit; font-size: 12px; cursor: pointer;
         background: #1e293b; color: #e2e8f0; border: 1px solid #475569; border-radius: 6px;
       }
       #dm-skip:hover { border-color: #fbbf24; color: #fcd34d; }
       #dm-skip.armed { background: #422006; border-color: #fbbf24; color: #fcd34d; }
+      /* Destructive, so it looks it rather than sitting there matching the
+         harmless button above it. */
+      #dm-restart {
+        margin-top: 4px; padding: 8px 10px; font: inherit; font-size: 12px; cursor: pointer;
+        background: #1e293b; color: #fca5a5; border: 1px solid #7f1d1d; border-radius: 6px;
+      }
+      #dm-restart:hover { background: #450a0a; border-color: #ef4444; color: #fecaca; }
+      #dm-restart.confirm { background: #7f1d1d; border-color: #ef4444; color: #fff; }
 
       /* Dungeon Master panel: the level summary and the start button. */
       #dmpanel {
@@ -283,7 +339,7 @@
       <div class="controls" id="menu-controls"></div>
       <p class="hint">
         down? press special to spend one of the party's three shared lives<br />
-        M mutes · H shows hitboxes · open three tabs to test a full room
+        M mutes · H shows hitboxes · F3 shows diagnostics · open three tabs to test a full room
       </p>
     </div>
 
@@ -295,11 +351,25 @@
          while a level runs, and a boss difficulty slider you cannot reach during
          the boss fight would be useless. -->
     <div id="dm-live">
+      <!-- Who is actually in the room, live. The summary table only exists
+           between levels, and "is anyone even connected" is a question the DM
+           has during one. -->
+      <label>In the game <b id="dm-roster-count">0/3</b></label>
+      <div id="dm-roster"></div>
+      <hr class="dm-rule" />
       <label for="dm-difficulty">Boss difficulty <b id="dm-difficulty-value">1.00x</b></label>
       <input type="range" id="dm-difficulty" min="0.25" max="3" step="0.05" value="1" />
-      <small id="dm-difficulty-what">the Clog's speed · the Wellspring's healing</small>
-      <button id="dm-skip">Skip to next boss</button>
+      <small id="dm-difficulty-what">the Clog's speed · the Gullet's healing</small>
+      <!-- Any level, not just the boss ones: the point is reaching whatever you
+           need to look at without playing up to it. -->
+      <label for="dm-skip-level">Skip to level</label>
+      <div class="dm-skiprow">
+        <input type="number" id="dm-skip-level" min="1" max="999" step="1" value="10" />
+        <button id="dm-skip">Skip</button>
+      </div>
       <small id="dm-skip-what"></small>
+      <button id="dm-restart">Restart game</button>
+      <small>throws the run away and starts level 1 immediately</small>
     </div>
 
     <div id="dmpanel">

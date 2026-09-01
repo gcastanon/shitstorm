@@ -9,20 +9,29 @@ import { ReviveSystem } from "./ReviveSystem";
 import { LIFE_ALIVE, LIFE_DEAD, LIFE_DOWNED } from "../shared/types";
 import { applyPerks, meleeSweep, perkById, rollOffer } from "../shared/perks";
 import {
-  arrowStormCount, cathedralRadiusMul, devourHealMul, devourRadiusMul, hasUpgrade,
+  arrowStormCount, cathedralRadiusMul, devourHealMul, devourReach, hasUpgrade,
   slowStormFactor, ultimateById, ultimateDurationSec, ultimateEchoSec, ultimatesFor,
   upgradeById, upgradesFor,
-  DEVOUR_HEAL_PER_CHUNK, DEVOUR_REACH_MUL, REBIRTH_HEALTH_BONUS, RECKONING_PHASE_SEC,
+  DEVOUR_HEAL_PER_CHUNK, REBIRTH_HEALTH_BONUS, RECKONING_PHASE_SEC,
 } from "../shared/ultimates";
-import { TIER_LARGE } from "../shared/asteroids";
+import { TIER_SMALL, tierSplitsInto } from "../shared/asteroids";
 import { mulberry32, isStanding } from "../shared/structures";
 import { scoreForLevel } from "../shared/score";
 import { BossSystem } from "./BossSystem";
 import { BOSS_CLOG, BOSS_NONE } from "../shared/types";
-import { isFinalBossLevel, nextBossLevel } from "../shared/boss";
+import { isFinalBossLevel } from "../shared/boss";
 
 /** Hit points one Salvage trigger puts back into a damaged structure. */
 const SALVAGE_REPAIR = 10;
+
+/**
+ * How far the DM's skip-to-level box will go.
+ *
+ * Well inside `forcedNextLevel`'s uint16, and far past anything anyone plays to
+ * — it exists so a typo in a number box cannot arm level 40000 and leave the
+ * room stuck waiting for it.
+ */
+const MAX_SKIP_LEVEL = 999;
 import { loadTuning } from "./tuningLoader";
 import { fixedDtSec, secToTicks, spawnPoint, stepPlayer, throneBubbleRadius } from "../shared/sim";
 import { isCharacterId, type CharacterId, type InputCommand } from "../shared/types";
@@ -81,6 +90,10 @@ export class ArenaRoom extends Room<GameState> {
     // advanceIntermission starts it on the next tick anyway.
     this.state.outcome = OUTCOME_WAITING;
     this.state.pendingLevel = 1;
+    // startLevel refills these on a fresh run, but the DM can now sit on the
+    // start screen for a while before one happens, and "lives 0/3" in their
+    // footer reads as a party that has already spent them.
+    this.state.lives = this.tuning.level.extraLives;
 
     this.onMessage("input", (client, cmd: InputCommand) => {
       const q = this.queues.get(client.sessionId);
@@ -100,6 +113,7 @@ export class ArenaRoom extends Room<GameState> {
     this.onMessage("dm:start", (client) => {
       if (client.sessionId !== this.state.dm.sessionId) return;
       if (this.state.outcome !== OUTCOME_WAITING) return;
+      if (!this.canStartLevel()) return;
       this.startLevel(this.state.pendingLevel);
     });
 
@@ -122,8 +136,7 @@ export class ArenaRoom extends Room<GameState> {
      * because a client is not trusted with a number this powerful.
      */
     /**
-     * Jump the run to the next boss level. A testing tool, and deliberately the
-     * DM's alone.
+     * Jump the run to any level. A testing tool, and deliberately the DM's alone.
      *
      * Two paths, because it is useful in both places. Pressed while the room is
      * waiting to start, it retargets the level about to begin. Pressed mid-level
@@ -131,7 +144,10 @@ export class ArenaRoom extends Room<GameState> {
      * would overwrite pendingLevel with level + 1 the moment the level finished
      * and the press would silently do nothing.
      */
-    this.onMessage("dm:skipToBoss", (client) => this.skipToBoss(client.sessionId));
+    this.onMessage("dm:skipToLevel", (client, level: number) => {
+      this.skipToLevel(client.sessionId, Number(level));
+    });
+    this.onMessage("dm:restart", (client) => this.restartRun(client.sessionId));
 
     this.onMessage("dm:difficulty", (client, value: number) => {
       if (client.sessionId !== this.state.dm.sessionId) return;
@@ -184,6 +200,7 @@ export class ArenaRoom extends Room<GameState> {
 
       client.send("tuning", this.tuning);
       console.log(`[arena ${this.roomId}] + ${this.state.dm.name} as DUNGEON MASTER`);
+      this.publishSeats();
       return;
     }
 
@@ -192,6 +209,14 @@ export class ArenaRoom extends Room<GameState> {
     }
 
     const character: CharacterId = isCharacterId(options.character) ? options.character : "ranger";
+
+    // One of each. The cabinet greys out the taken ones, but that is advisory —
+    // it is built from matchmaking metadata that can be a moment stale, and two
+    // people can click the same card at the same time. This is the check that
+    // actually decides, and it is the reason the menu can afford to be a hint.
+    const held = this.playerByCharacter(character);
+    if (held) throw new Error(`${character} is already taken by ${held.name}`);
+
     const spawn = spawnPoint(this.joinIndex++, this.tuning);
 
     const p = new Player();
@@ -210,6 +235,27 @@ export class ArenaRoom extends Room<GameState> {
     // Clients never hardcode tuning; they get the server's copy on join.
     client.send("tuning", this.tuning);
     console.log(`[arena ${this.roomId}] + ${p.name} as ${character} (${this.clients.length}/${this.maxClients})`);
+    this.publishSeats();
+  }
+
+  /**
+   * Who is sitting where, published to matchmaking.
+   *
+   * The entry screen has not joined anything yet, so synced state cannot reach
+   * it — room metadata is the only thing a client can read *before* it picks.
+   * Advisory by nature: it is a snapshot the matchmaker hands out, so `onJoin`
+   * above is what actually enforces one-of-each.
+   */
+  private publishSeats() {
+    const taken: Record<string, string> = {};
+    this.state.players.forEach((p) => { taken[p.character] = p.name; });
+    void this.setMetadata({ taken, dm: this.state.dm.present ? this.state.dm.name : "" });
+  }
+
+  private playerByCharacter(character: string) {
+    let found: Player | undefined;
+    this.state.players.forEach((p) => { if (p.character === character) found = p; });
+    return found;
   }
 
   override onLeave(client: Client) {
@@ -220,6 +266,7 @@ export class ArenaRoom extends Room<GameState> {
       // Whatever was waiting on them is now unblocked, since the auto-start
       // fallback applies the moment no DM is connected.
       console.log(`[arena ${this.roomId}] - dungeon master left`);
+      this.publishSeats();
       return;
     }
 
@@ -255,6 +302,22 @@ export class ArenaRoom extends Room<GameState> {
     this.state.players.delete(client.sessionId);
     this.queues.delete(client.sessionId);
     console.log(`[arena ${this.roomId}] - ${client.sessionId}`);
+    // Their character is free again the moment they are gone.
+    this.publishSeats();
+
+    // The same invariant from the other side. A level may not start without a
+    // player, so it may not keep running once the last one has gone — and it
+    // would run forever, because checkOutcome cannot end a level nobody is in.
+    // The room survives an empty player list whenever a DM is still connected,
+    // so this is reachable rather than theoretical.
+    if (this.state.players.size === 0 && this.state.outcome !== OUTCOME_WAITING) {
+      console.log(`[arena ${this.roomId}] last player left mid-run; back to the start screen`);
+      // That run is over, so whoever arrives next gets a fresh one. Saying so
+      // explicitly matters because an armed boss skip can redirect awaitStart
+      // away from level 1, and startLevel reads "fresh run" off the level number.
+      this.restartOnNextStart = true;
+      this.awaitStart(1);
+    }
   }
 
   override onDispose() {
@@ -363,7 +426,7 @@ export class ArenaRoom extends Room<GameState> {
         // The arrow's own id is the swing id, so the two fragments it creates
         // are immune to it and cannot be chained by the same shot.
         if (destroys) this.asteroids.removeById(asteroidId);
-        else this.asteroids.splitById(asteroidId, projectileId, heading);
+        else this.asteroids.hitById(asteroidId, projectileId, heading);
         const shooter = this.state.players.get(owner);
         if (shooter) this.creditKill(shooter);
       },
@@ -414,23 +477,74 @@ export class ArenaRoom extends Room<GameState> {
   }
 
   /**
-   * Jump the run to the next boss level. A testing tool, and the DM's alone.
+   * Jump the run to any level. A testing tool, and the DM's alone.
+   *
+   * Any level, not just a boss one: the point is reaching whatever you need to
+   * look at — level 5 for the armoured sewage, 15 for the bolus, 10 or 20 for a
+   * boss — without playing up to it.
+   *
+   * **A nonsense level is refused outright rather than corrected**, because a
+   * debugging tool that quietly sends you somewhere other than where you asked
+   * is worse than one that does nothing.
    *
    * A method rather than a closure in the handler so a probe drives the real
    * decision — the same reason togglePause is one. A test that re-implements
    * this would agree with itself while disagreeing with the game.
    */
-  skipToBoss(sessionId: string) {
+  skipToLevel(sessionId: string, level: number) {
     if (sessionId !== this.state.dm.sessionId) return;
+    if (!Number.isInteger(level) || level < 1 || level > MAX_SKIP_LEVEL) return;
 
-    const target = nextBossLevel(this.tuning, this.state.level);
-    this.state.forcedNextLevel = target;
+    this.state.forcedNextLevel = level;
     // Pressed while the room is already waiting, it retargets the level about to
     // begin. Pressed mid-level, endLevel picks it up — without which endLevel
     // would overwrite pendingLevel and the press would silently do nothing.
-    if (this.state.outcome === OUTCOME_WAITING) this.state.pendingLevel = target;
+    if (this.state.outcome === OUTCOME_WAITING) this.state.pendingLevel = level;
 
-    console.log(`[arena ${this.roomId}] DM armed a skip to level ${target}`);
+    console.log(`[arena ${this.roomId}] DM armed a skip to level ${level}`);
+  }
+
+  /**
+   * Throw the run away and start again from level 1. The DM's alone.
+   *
+   * Immediate, not armed: a restart button that waited for the current level to
+   * finish would be useless in the situation you press it in. `startLevel(1)`
+   * already means "a fresh run" — it rebuilds the town, restores everyone,
+   * clears perks, ultimates, lives and score — so this is that call plus the
+   * permission check.
+   *
+   * A pause does not survive it. Restarting while frozen would otherwise leave
+   * the new level paused by somebody who has already spent their pause on a run
+   * that no longer exists.
+   */
+  restartRun(sessionId: string) {
+    if (sessionId !== this.state.dm.sessionId) return;
+
+    this.state.pausedBy = "";
+    this.state.pausedByName = "";
+    this.state.forcedNextLevel = 0;
+    this.restartOnNextStart = false;
+
+    console.log(`[arena ${this.roomId}] DM restarted the run`);
+    // With nobody playing there is nothing to start, so it parks at the start
+    // screen instead. The reset is not skipped, only deferred: pendingLevel 1
+    // makes the eventual startLevel a fresh run anyway.
+    if (this.canStartLevel()) this.startLevel(1);
+    else this.awaitStart(1);
+  }
+
+  /**
+   * A level needs somebody to play it.
+   *
+   * The Dungeon Master does not count, and cannot: they are not in
+   * `state.players` at all, which is the whole point of keeping the role
+   * separate. Without this a DM alone in a room could press Start — or tick
+   * Passive DM, which drops the same gate — and set the storm going over an
+   * empty town. Nothing would ever end it, either: `checkOutcome` requires
+   * `players.size > 0`, so a level with no players cannot even be lost.
+   */
+  private canStartLevel() {
+    return this.state.players.size > 0;
   }
 
   /**
@@ -579,8 +693,8 @@ export class ArenaRoom extends Room<GameState> {
       && this.activeBubbles().some((s) => Math.hypot(b.x - s.x, b.y - s.y) <= s.radius + b.radius);
 
     const ev = {
-      onSpit: (x: number, y: number, heading: number) => {
-        this.asteroids.spawnAt(x, y, heading);
+      onSpit: (x: number, y: number, heading: number, speed?: number) => {
+        this.asteroids.spawnAt(x, y, heading, TIER_SMALL, speed);
         this.state.lvlChunksSpawned++;
         this.state.runChunksSpawned++;
       },
@@ -589,10 +703,13 @@ export class ArenaRoom extends Room<GameState> {
         if (s) this.damageStructure(id, s.hp);
       },
       onTownLost: () => this.endLevel(OUTCOME_LOST, "the Clog finished the town"),
+      // Deliberately not credited as a chunk kill: nobody destroyed it, the boss
+      // ate it. Counting it would make "sewage destroyed" reward feeding the thing.
+      onDevour: (id: string) => { this.asteroids.removeById(id); },
     };
 
-    // update() handles the Wellspring and does the difficulty retune for both;
-    // the Clog needs `blocked` passed through, so it retunes and then steps.
+    // update() handles the Gullet and does the difficulty retune for both; the
+    // Clog needs `blocked` passed through, so it retunes and then steps.
     if (b.kind === BOSS_CLOG) {
       this.bosses.retuneNow();
       this.bosses.updateClog(dt, ev, blocked);
@@ -604,6 +721,17 @@ export class ArenaRoom extends Room<GameState> {
   /** Everything that hurts a boss lands here, so one place sees it die. */
   private hurtBoss(amount: number, by: Player | null) {
     if (!this.bosses.active) return;
+
+    // Hitting the Clog can knock a chunk loose. Rolled before the damage is
+    // applied, so a killing blow can still spit — the mass is coming apart, and
+    // the last hit is the one most likely to be doing it.
+    if (this.bosses.rollHitShed()) {
+      const b = this.state.boss;
+      this.asteroids.spawnAt(b.x, b.y, Math.random() * Math.PI * 2);
+      this.state.lvlChunksSpawned++;
+      this.state.runChunksSpawned++;
+    }
+
     if (!this.bosses.damage(amount)) return;
 
     // Deliberately not credited as a chunk kill: "sewage destroyed" is a count
@@ -770,6 +898,7 @@ export class ArenaRoom extends Room<GameState> {
     }
 
     if (this.state.outcome === OUTCOME_WAITING) {
+      if (!this.canStartLevel()) return;
       // A DM holds the door — unless they have said they are only watching.
       // Nobody in that chair also means nobody to hold it, which is what keeps
       // solo play and the bot soak from stalling here forever.
@@ -896,7 +1025,13 @@ export class ArenaRoom extends Room<GameState> {
     // Boss levels replace their waves with one enormous thing. Seeded off the
     // level so a given run meets it in the same place every time, the way the
     // town layout and the perk offers already are.
+    //
+    // "Replace" is now literally true: the wave spawner is switched off. It never
+    // was before — a boss ran on top of full waves — and for the Gullet that
+    // would have been fatal, because waves aim at the town centre and it sits
+    // there eating whatever arrives.
     this.bosses.clear();
+    this.asteroids.wavesEnabled = !this.bosses.isBossLevel(level);
     if (this.bosses.isBossLevel(level)) {
       this.bosses.spawn(level, mulberry32((this.tuning.level.seed ^ (level * 0x85ebca6b)) >>> 0));
     }
@@ -1111,8 +1246,10 @@ export class ArenaRoom extends Room<GameState> {
   /** Devour eats what comes close and turns it into health for the team. */
   private tickDevour(p: Player, ups: string[], dt: number) {
     const atk = this.tuning.characters[p.character].attack;
-    const base = atk.kind === "melee" ? atk.reach : this.tuning.player.radius * 4;
-    const reach = base * DEVOUR_REACH_MUL * devourRadiusMul(ups);
+    // Composed by the shared function, not inline: the client draws the maw at
+    // exactly this radius, and two copies of the arithmetic would eventually
+    // disagree about where the mouth is.
+    const reach = devourReach(atk, this.tuning.player.radius, ups);
 
     // The maw cannot swallow a boss whole. removeById would delete it outright,
     // which is the single strongest argument for a boss not being a chunk.
@@ -1172,6 +1309,12 @@ export class ArenaRoom extends Room<GameState> {
 
   /** The instant half of an ultimate, which Echo and Rally repeat. */
   private fireUltimate(p: Player, id: string, ups: string[], aim: number) {
+    // Every cast and every echo passes through here, which is what makes this
+    // the one place that can count them. The client diffs this to fire the cast
+    // effect — nothing else can, because ultTicks stays 0 for the instant
+    // ultimates and ultReady only falls once.
+    p.ultCasts = (p.ultCasts + 1) % 256;
+
     if (id === "reckoning") this.reckoning(p, ups);
     if (id === "consecrate") this.consecrate(ups);
     if (id === "arrow-storm") this.arrowStorm(p, ups, aim);
@@ -1194,8 +1337,11 @@ export class ArenaRoom extends Room<GameState> {
     for (const a of [...this.state.asteroids] as Asteroid[]) {
       a.vx *= -2;
       a.vy *= -2;
-      if (doubling && a.tier === TIER_LARGE) {
-        this.asteroids.splitById(a.id, `reck-${this.state.tick}`, Math.atan2(a.vy, a.vx));
+      // Anything that can break, breaks — so a reversed bolus comes apart too
+      // rather than sailing out whole. Written against the tier's own rule
+      // instead of naming Large, which is what it used to do.
+      if (doubling && tierSplitsInto(this.tuning, a.tier as Tier) !== null) {
+        this.asteroids.hitById(a.id, `reck-${this.state.tick}`, Math.atan2(a.vy, a.vx));
         this.creditKill(p);
       }
     }
@@ -1359,12 +1505,13 @@ export class ArenaRoom extends Room<GameState> {
 
     const swingId = `${p.sessionId}-${this.state.tick}`;
     for (const target of this.asteroids.inArc(p.x, p.y, aim, reach, arcDegrees, swingId)) {
-      // Demolition takes a Large off the board instead of turning it into two
-      // Smalls, which is the whole point of it.
+      // Demolition takes a chunk off the board instead of breaking it into
+      // pieces, which is the whole point of it — armour and all, so a crust does
+      // not need its second hit and a bolus never becomes two Large.
       if (m.destroyLarge) this.asteroids.removeById(target.id);
       // Fan the fragments off the line running from the swinger to the chunk, so
       // they leave sideways rather than into the face of whoever just hit it.
-      else this.asteroids.splitById(target.id, swingId, Math.atan2(target.y - p.y, target.x - p.x));
+      else this.asteroids.hitById(target.id, swingId, Math.atan2(target.y - p.y, target.x - p.x));
       this.creditKill(p);
     }
   }
@@ -1417,9 +1564,6 @@ export class ArenaRoom extends Room<GameState> {
     if (wasStanding && s.hp <= 0) {
       this.state.lvlStructuresLost++;
       this.state.runStructuresLost++;
-      // The Wellspring drinks the town. Hooked on the transition to zero, not on
-      // damage, so chipping a wall feeds it nothing.
-      this.bosses.onStructureLost();
     }
     // Collision reads this.boxes, so a wall that just fell must stop blocking
     // on the very next tick rather than whenever the next full resync happens.

@@ -1,8 +1,8 @@
 import { ArraySchema } from "@colyseus/schema";
 import { Asteroid, GameState } from "./GameState";
 import {
-  TIER_LARGE, TIER_SMALL, isOutOfPlay, firstStructureHit, reflectOffBox, reflectOffCircle,
-  splitAsteroid, stepAsteroid, tierCfg, tierRadius, type AsteroidSim, type Tier,
+  TIER_SMALL, isOutOfPlay, firstStructureHit, pickTier, reflectOffBox, reflectOffCircle,
+  splitAsteroid, stepAsteroid, tierCfg, tierHits, tierRadius, type AsteroidSim, type Tier,
 } from "../shared/asteroids";
 import { mulberry32, townBox, type StructureBox } from "../shared/structures";
 import { secToTicks } from "../shared/sim";
@@ -49,6 +49,20 @@ export class AsteroidSystem {
     this.state.waveIndex = 0;
     this.state.wavePhaseEndTick = secToTicks(this.t.waves.spawnSec, this.t);
   }
+
+  /**
+   * Whether the wave spawner is running.
+   *
+   * Off on boss levels, where the boss is the only source of sewage. The docs
+   * claimed this was true from the day bosses were added; the code never did it,
+   * so levels 10 and 20 quietly ran a boss *on top of* full waves. It matters
+   * more than it used to: waves aim at the town centre, which is exactly where
+   * the Gullet sits, so they would have fed it chunks nobody summoned.
+   *
+   * Only the spawning stops. Chunks already in the air keep flying and the phase
+   * clock keeps turning, so nothing else has to know about this.
+   */
+  wavesEnabled = true;
 
   get elapsed() { return this.elapsedSec; }
   get count() { return this.state.asteroids.length; }
@@ -140,7 +154,7 @@ export class AsteroidSystem {
     // arena drains over the four to seven seconds one takes to cross rather
     // than snapping clean — the start of a lull is still dangerous, and judging
     // when it is safe to commit to a revive is the interesting part.
-    if (this.state.waveSpawning) {
+    if (this.state.waveSpawning && this.wavesEnabled) {
       this.spawnTimer -= dt;
       if (this.spawnTimer <= 0) {
         this.spawnTimer += this.currentInterval();
@@ -201,12 +215,31 @@ export class AsteroidSystem {
     }
   }
 
-  /** Apply an attack to one chunk: Large becomes two Small, Small dies. */
-  splitById(id: string, swingId?: string, awayAngle?: number): boolean {
+  /**
+   * Land one attack on a chunk.
+   *
+   * Named for the hit rather than the split, because since the armoured tier
+   * exists a hit does not necessarily break anything: `hits` comes down, and
+   * only when it reaches zero does the chunk go and its children arrive. What
+   * those children are is the tier's own business — Large and crust give Smalls,
+   * a bolus gives two Large which will split again.
+   *
+   * A chunk that survives is stamped with the swing that hit it, exactly as
+   * children are, so a single sweep cannot strip both layers of a crust at once.
+   * Thirty-six Arrow Storm arrows landing on one tick are thirty-six separate
+   * hits and will, which is an ultimate behaving like one.
+   */
+  hitById(id: string, swingId?: string, awayAngle?: number): boolean {
     const idx = this.state.asteroids.findIndex((a) => a.id === id);
     if (idx < 0) return false;
     const a = this.state.asteroids[idx];
     if (!a) return false;
+
+    if (a.hits > 1) {
+      a.hits -= 1;
+      if (this.t.asteroids.split.childrenImmuneToSameSwing) a.swingId = swingId;
+      return true;
+    }
 
     const children = splitAsteroid(a as unknown as AsteroidSim, this.t, () => this.makeId(), awayAngle);
     this.state.asteroids.splice(idx, 1);
@@ -215,6 +248,7 @@ export class AsteroidSystem {
       const child = new Asteroid();
       child.id = c.id; child.tier = c.tier;
       child.x = c.x; child.y = c.y; child.vx = c.vx; child.vy = c.vy;
+      child.hits = tierHits(this.t, c.tier);
       // Immunity marker so the swing that created these cannot also destroy them.
       if (this.t.asteroids.split.childrenImmuneToSameSwing) child.swingId = swingId;
       this.state.asteroids.push(child);
@@ -227,7 +261,7 @@ export class AsteroidSystem {
    *
    * Reach is measured to the chunk's edge rather than its centre, so a Large
    * connects when it looks like it should. Chunks carrying `swingId` are skipped:
-   * that is the marker splitById stamps on children, and it stops one sweep from
+   * that is the marker hitById stamps on children and on survivors, and it stops one sweep from
    * chaining through the fragments it just created.
    *
    * Returns a plain array — state.asteroids is never sorted or filtered in place.
@@ -389,7 +423,10 @@ export class AsteroidSystem {
     const jitter = ((this.rng() * 2 - 1) * s.aimJitterDegrees * Math.PI) / 180;
     const ang = Math.atan2(ty - y, tx - x) + jitter;
 
-    const tier: Tier = this.rng() < s.largeChance ? TIER_LARGE : TIER_SMALL;
+    // Weighted among the tiers this level has unlocked. Consumes exactly one rng
+    // value, and below level 5 the weights are the original two summing to 1, so
+    // a seeded run before then draws precisely what it always did.
+    const tier = pickTier(this.t, this.state.level, this.rng);
     const cfg = tierCfg(this.t, tier);
     // Stamped at spawn rather than applied per tick, so a chunk keeps the speed
     // it was launched with even if the level ends around it — and so split
@@ -399,6 +436,7 @@ export class AsteroidSystem {
     const a = new Asteroid();
     a.id = this.makeId();
     a.tier = tier;
+    a.hits = tierHits(this.t, tier);
     a.x = x; a.y = y;
     a.vx = Math.cos(ang) * speed;
     a.vy = Math.sin(ang) * speed;
@@ -406,24 +444,30 @@ export class AsteroidSystem {
   }
 
   /**
-   * Put one chunk at a point, on a heading. What a boss sheds or pumps.
+   * Put one chunk at a point, on a heading. What a boss sheds or summons.
    *
    * Separate from spawn() because that one is about the wave system — it picks
    * an edge, aims at the town and is throttled by the spawn interval. This is
    * somebody else's chunk arriving on somebody else's schedule.
+   *
+   * `speed` overrides the tier's range *and* the level multiplier. The Gullet's
+   * tribute needs a fixed, slow speed to be interceptable at all: the tier speed
+   * at level 20 crosses its summoning ring in about a second. Omit it and the
+   * behaviour is the tier's, which is what the Clog's shedding still gets.
    */
-  spawnAt(x: number, y: number, heading: number, tier: Tier = TIER_SMALL) {
+  spawnAt(x: number, y: number, heading: number, tier: Tier = TIER_SMALL, speed?: number) {
     if (this.state.asteroids.length >= this.t.asteroids.spawn.maxAlive) return;
 
     const cfg = tierCfg(this.t, tier);
-    const speed = (cfg.speedMin + this.rng() * (cfg.speedMax - cfg.speedMin)) * this.levelSpeedMul();
+    const chosen = speed ?? (cfg.speedMin + this.rng() * (cfg.speedMax - cfg.speedMin)) * this.levelSpeedMul();
 
     const a = new Asteroid();
     a.id = this.makeId();
     a.tier = tier;
+    a.hits = tierHits(this.t, tier);
     a.x = x; a.y = y;
-    a.vx = Math.cos(heading) * speed;
-    a.vy = Math.sin(heading) * speed;
+    a.vx = Math.cos(heading) * chosen;
+    a.vy = Math.sin(heading) * chosen;
     this.state.asteroids.push(a);
   }
 

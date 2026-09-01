@@ -1,21 +1,25 @@
-import { Boss, GameState, Structure } from "./GameState";
+import { Asteroid, Boss, GameState, Structure } from "./GameState";
 import { isStanding, pointToBoxDistance, townBox } from "../shared/structures";
-import { BOSS_CLOG, BOSS_NONE, BOSS_WELLSPRING } from "../shared/types";
+import { BOSS_CLOG, BOSS_GULLET, BOSS_NONE } from "../shared/types";
 import { bossKindFor, isBossLevel } from "../shared/boss";
+import { secToTicks } from "../shared/sim";
 import type { Tuning } from "../shared/tuning";
 
 /** What the room has to act on, since only it may end a level or spawn sewage. */
 export interface BossEvents {
-  /** The Clog sheds a chunk from its wake, or the Wellspring pumps one out. */
-  onSpit(x: number, y: number, heading: number): void;
+  /** The Clog sheds a chunk from its wake, or the Gullet summons one. `speed`
+   *  overrides the tier's when given — the Gullet's tribute has its own. */
+  onSpit(x: number, y: number, heading: number, speed?: number): void;
   /** The Clog pulled a building down. */
   onRaze(structureId: string): void;
   /** Nothing is left standing — the Clog has finished the town. */
   onTownLost(): void;
+  /** The Gullet swallowed this chunk. The room removes it; the heal is done here. */
+  onDevour(asteroidId: string): void;
 }
 
 /**
- * The Clog and the Wellspring.
+ * The Clog and the Gullet.
  *
  * Runs every fixed tick from outside the input loop, beside AsteroidSystem and
  * for the same reason: a boss must not stop advancing because one player's
@@ -46,7 +50,8 @@ export class BossSystem {
     b.hp = 0; b.maxHp = 0; b.baseMaxHp = 0; b.radius = 0;
     b.phase = 0; b.razing = false;
     b.vx = 0; b.vy = 0;
-    b.shedTimer = 0; b.razeTimer = 0; b.pumpTimer = 0;
+    b.shedTimer = 0; b.razeTimer = 0; b.hitShedTick = -1e9;
+    b.summonTimer = 0; b.patternIndex = 0; b.patternStep = 0; b.summonAngle = 0;
   }
 
   get active(): boolean { return this.boss.kind !== BOSS_NONE && this.boss.hp > 0; }
@@ -54,9 +59,9 @@ export class BossSystem {
   /**
    * Put a boss on the board.
    *
-   * The Clog comes in from an edge aimed at the town; the Wellspring erupts in
-   * the middle of it. Both aim at townBox rather than the arena centre, which is
-   * the same rectangle the sewage spawner and the ground rendering read.
+   * The Clog comes in from an edge aimed at the town; the Gullet opens in the
+   * middle of it. Both aim at townBox rather than the arena centre, which is the
+   * same rectangle the sewage spawner and the ground rendering read.
    */
   spawn(level: number, rand: () => number) {
     this.clear();
@@ -91,14 +96,17 @@ export class BossSystem {
       return;
     }
 
-    const cfg = this.t.boss.wellspring;
+    const cfg = this.t.boss.gullet;
     b.baseMaxHp = this.scaledHp(cfg.hp);
     b.maxHp = Math.max(1, Math.round(b.baseMaxHp * this.difficulty()));
     b.hp = b.maxHp;
     b.radius = cfg.radius;
     b.x = town.x;
     b.y = town.y;
-    b.pumpTimer = cfg.pumpSec;
+    // Starts on the spiral, mid-pattern-zero, with the emitter at 0. Deliberately
+    // not seeded: a pattern that differs run to run is not a pattern, and the
+    // town layout is already the thing that varies.
+    b.summonTimer = cfg.spiral.everySec;
   }
 
   /**
@@ -134,26 +142,53 @@ export class BossSystem {
     if (!this.active || amount <= 0) return false;
     b.hp = Math.max(0, b.hp - Math.round(amount));
 
-    if (b.kind === BOSS_CLOG && b.phase === 0
-      && b.hp <= b.maxHp * this.t.boss.clog.phaseAtHealthFraction) {
-      b.phase = 1;
-    }
+    // Latched, and never cleared. The Gullet can heal back above half and stays
+    // enraged, which is deliberate: a boss that calms down when you stop hurting
+    // it rewards not fighting it.
+    const frac = b.kind === BOSS_CLOG
+      ? this.t.boss.clog.phaseAtHealthFraction
+      : this.t.boss.gullet.phaseAtHealthFraction;
+    if (b.phase === 0 && b.hp <= b.maxHp * frac) b.phase = 1;
+
     return b.hp <= 0;
   }
 
-  /** The Wellspring drinks whenever the town loses a building. */
-  onStructureLost() {
+  /**
+   * Whether this hit knocks a chunk loose from the Clog.
+   *
+   * Hitting it is what fills the arena, rather than a flat timer doing it — so
+   * the pressure tracks how hard the party is actually fighting, and standing
+   * off it is a real (if slow) way to keep the screen clear.
+   *
+   * **Clog only.** The Gullet sits on top of anything shed at its own position
+   * and would swallow it on the same tick, healing itself for being attacked.
+   *
+   * Rate-limited, and that floor is load-bearing rather than defensive: every
+   * arrow is its own damage event, so Arrow Storm lands 36 at once and
+   * Windrunner sustains ~90 a second. Without it one ultimate would bury the
+   * screen and the cap would silently start dropping chunks at maxAlive.
+   *
+   * Rolled here rather than in the room so there is one place that decides, and
+   * so a probe can drive the real decision.
+   */
+  rollHitShed(): boolean {
     const b = this.boss;
-    if (b.kind !== BOSS_WELLSPRING || b.hp <= 0) return;
-    const heal = this.t.boss.wellspring.healPerStructureLost * this.difficulty();
-    b.hp = Math.min(b.maxHp, b.hp + Math.round(heal));
+    if (b.kind !== BOSS_CLOG || b.hp <= 0) return false;
+
+    const cfg = this.t.boss.clog;
+    const floor = secToTicks(cfg.hitShedMinSec, this.t);
+    if (this.state.tick - b.hitShedTick < floor) return false;
+    if (Math.random() >= cfg.hitShedChance) return false;
+
+    b.hitShedTick = this.state.tick;
+    return true;
   }
 
   update(dt: number, ev: BossEvents) {
     if (!this.active) return;
     this.retune();
     if (this.boss.kind === BOSS_CLOG) this.updateClog(dt, ev);
-    else this.updateWellspring(dt, ev);
+    else this.updateGullet(dt, ev);
   }
 
   /**
@@ -261,17 +296,120 @@ export class BossSystem {
     ev.onRaze(target.id);
   }
 
-  /** The Wellspring sits in the town and pumps. */
-  private updateWellspring(dt: number, ev: BossEvents) {
+  /**
+   * The Gullet sits in the town, summons sewage to itself, and drinks whatever
+   * arrives.
+   *
+   * It inverts the game for one level: for nineteen levels sewage is a thing to
+   * dodge, and here it is a thing you have to go out and stop.
+   */
+  private updateGullet(dt: number, ev: BossEvents) {
+    this.drink(ev);
+
     const b = this.boss;
-    const cfg = this.t.boss.wellspring;
+    const p = this.pattern();
 
-    b.pumpTimer -= dt;
-    if (b.pumpTimer > 0) return;
-    b.pumpTimer += cfg.pumpSec;
+    b.summonTimer -= dt;
+    if (b.summonTimer > 0) return;
+    // Enraged tightens every interval rather than each pattern having its own
+    // phase numbers — one knob, and it cannot make one pattern out of step.
+    b.summonTimer += p.everySec * (b.phase === 1 ? this.t.boss.gullet.phaseEveryMul : 1);
 
-    for (let i = 0; i < cfg.pumpCount; i++) {
-      ev.onSpit(b.x, b.y, Math.random() * Math.PI * 2);
+    this.emit(ev);
+
+    b.patternStep++;
+    if (b.patternStep >= p.steps) {
+      b.patternStep = 0;
+      b.patternIndex = (b.patternIndex + 1) % 3;
+      // The next pattern starts where the last one left off, so the emitter
+      // sweeps continuously instead of snapping back to the same bearing.
+    }
+  }
+
+  /** Which pattern is running, and how often it steps. */
+  private pattern(): { everySec: number; steps: number } {
+    const g = this.t.boss.gullet;
+    if (this.boss.patternIndex === 0) return g.spiral;
+    if (this.boss.patternIndex === 1) return g.spokes;
+    return g.wall;
+  }
+
+  /**
+   * One step of the current pattern.
+   *
+   * **Every chunk flies in a straight line at the Gullet's centre.** The spiral
+   * is a spiral because the emitter has rotated between shots, not because
+   * anything curves — clients extrapolate chunks along a straight line from the
+   * newest snapshot, so a curving chunk would desync and stay desynced. This is
+   * the whole reason the feature needed no netcode changes.
+   */
+  private emit(ev: BossEvents) {
+    const b = this.boss;
+    const g = this.t.boss.gullet;
+    const RAD = Math.PI / 180;
+
+    if (b.patternIndex === 0) {
+      this.summon(ev, b.summonAngle);
+      b.summonAngle += g.spiral.turnDeg * RAD;
+      return;
+    }
+
+    if (b.patternIndex === 1) {
+      // A closing cage: evenly spaced bearings, the whole set turned a little
+      // each volley so the gaps move and cannot be stood in.
+      for (let i = 0; i < g.spokes.count; i++) {
+        this.summon(ev, b.summonAngle + (i / g.spokes.count) * Math.PI * 2);
+      }
+      b.summonAngle += g.spokes.turnDeg * RAD;
+      return;
+    }
+
+    // A wave to break or go around: a contiguous arc fired together, the bearing
+    // jumping far enough each volley that it arrives from somewhere new.
+    const span = g.wall.arcDeg * RAD;
+    const start = b.summonAngle - span / 2;
+    for (let i = 0; i < g.wall.count; i++) {
+      const f = g.wall.count === 1 ? 0.5 : i / (g.wall.count - 1);
+      this.summon(ev, start + span * f);
+    }
+    b.summonAngle += g.wall.turnDeg * RAD;
+  }
+
+  /** One chunk on the ring at `angle`, flying straight at the Gullet. */
+  private summon(ev: BossEvents, angle: number) {
+    const b = this.boss;
+    const g = this.t.boss.gullet;
+    const x = b.x + Math.cos(angle) * g.summonRadius;
+    const y = b.y + Math.sin(angle) * g.summonRadius;
+    // Inward is the reverse of the bearing it was placed on.
+    ev.onSpit(x, y, angle + Math.PI, g.tributeSpeed);
+  }
+
+  /**
+   * Swallow whatever has reached it, and heal.
+   *
+   * Any chunk, not only summoned ones — one rule the players can read off the
+   * screen. Waves are suppressed on boss levels, so in practice the Gullet's own
+   * tribute is the only sewage there is.
+   *
+   * Removal is the room's job because AsteroidSystem is not this system's to
+   * touch; the heal is done here so there is one place that knows what a chunk
+   * is worth.
+   */
+  private drink(ev: BossEvents) {
+    const b = this.boss;
+    const g = this.t.boss.gullet;
+    const heal = Math.max(1, Math.round(g.healPerChunk * this.difficulty()));
+
+    // Spread to a plain array before iterating: state.asteroids is never
+    // filtered in place, and the room removes from it inside this loop.
+    for (const a of [...this.state.asteroids] as Asteroid[]) {
+      const dx = a.x - b.x, dy = a.y - b.y;
+      // Centre-to-centre against the Gullet's radius alone. Its mouth is the
+      // hole, not the rim, so a chunk clipping the edge is not swallowed.
+      if (dx * dx + dy * dy > b.radius * b.radius) continue;
+      ev.onDevour(a.id);
+      b.hp = Math.min(b.maxHp, b.hp + heal);
     }
   }
 

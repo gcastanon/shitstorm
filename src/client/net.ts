@@ -50,6 +50,9 @@ export interface RemoteSnapshotPlayer {
   ultimateUpgrades: string[];
   ultReady: boolean;
   ultTicks: number;
+  /** Bumped every time this player's ultimate actually fires, echoes included.
+   *  The only thing that can carry an instant ultimate's cast to the client. */
+  ultCasts: number;
   /** Counters for the Dungeon Master's summary, level and run side by side. */
   stats: PlayerStats;
 }
@@ -122,6 +125,10 @@ export class NetClient {
   bossDifficulty = 1;
   /** A level the DM has armed a jump to, or 0. */
   forcedNextLevel = 0;
+  /** Cover is indestructible for the rest of this level (Consecrate), and turns
+   *  sewage away rather than eating it (Spires). */
+  coverWarded = false;
+  coverReflects = false;
 
   /** The party's run score, and the breakdown of the last level's award. */
   score = 0;
@@ -204,6 +211,7 @@ export class NetClient {
           ultimateUpgrades: [...(p.ultimateUpgrades ?? [])],
           ultReady: !!p.ultReady,
           ultTicks: p.ultTicks ?? 0,
+          ultCasts: p.ultCasts ?? 0,
           stats: {
             lvlDamageTaken: p.lvlDamageTaken, runDamageTaken: p.runDamageTaken,
             lvlChunksKilled: p.lvlChunksKilled, runChunksKilled: p.runChunksKilled,
@@ -225,7 +233,7 @@ export class NetClient {
       }));
 
       this.asteroids = state.asteroids.map((a: any) => ({
-        id: a.id, tier: a.tier, x: a.x, y: a.y, vx: a.vx, vy: a.vy,
+        id: a.id, tier: a.tier, hits: a.hits ?? 1, x: a.x, y: a.y, vx: a.vx, vy: a.vy,
       }));
       this.projectiles = state.projectiles.map((p: any) => ({
         id: p.id, owner: p.owner, x: p.x, y: p.y, vx: p.vx, vy: p.vy, travelled: 0,
@@ -239,6 +247,11 @@ export class NetClient {
       this.score = state.score ?? 0;
       this.bossDifficulty = state.bossDifficulty ?? 1;
       this.forcedNextLevel = state.forcedNextLevel ?? 0;
+      // Consecrate's two states. coverReflects has been synced since Spires was
+      // built, with a comment saying the client would draw warded cover
+      // differently — it never did until now.
+      this.coverWarded = !!state.coverWarded;
+      this.coverReflects = !!state.coverReflects;
       const b = state.boss;
       this.boss = b && b.kind
         ? {

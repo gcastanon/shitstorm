@@ -33,7 +33,10 @@ export class Sfx {
   /** Call from a genuine user gesture. Safe to call repeatedly. */
   unlock() {
     if (this.ctx) {
-      if (this.ctx.state === "suspended") void this.ctx.resume();
+      // Not while muted. This is called on every keypress, so without the guard
+      // the very next key after pressing M would resume the context that M just
+      // suspended — silent, because the gain is zero, but running.
+      if (!this.muted && this.ctx.state === "suspended") void this.ctx.resume();
       return;
     }
     const Ctor = window.AudioContext ?? (window as any).webkitAudioContext;
@@ -53,9 +56,27 @@ export class Sfx {
     this.music = new Music(this.ctx, this.master);
   }
 
+  /**
+   * Mute stops the sound rather than just turning it down.
+   *
+   * Zeroing the master gain leaves the music's scheduler running: it keeps
+   * building oscillator nodes every 25ms and handing them to an audio graph
+   * nobody can hear. Stopping the scheduler and suspending the context means
+   * muted really is paused — no work, no scheduled tail carrying on underneath,
+   * and unmuting picks the track up rather than dropping into the middle of a
+   * bar that played to an empty room.
+   */
   toggleMute() {
     this.muted = !this.muted;
-    if (this.master && this.ctx) this.master.gain.value = this.muted ? 0 : MASTER_GAIN;
+    if (this.master) this.master.gain.value = this.muted ? 0 : MASTER_GAIN;
+
+    if (!this.ctx) return this.muted;
+    if (this.muted) {
+      this.music?.stop();
+      void this.ctx.suspend();
+    } else {
+      void this.ctx.resume();
+    }
     return this.muted;
   }
 
@@ -121,6 +142,18 @@ export class Sfx {
 
   swallow() {
     this.tone("sine", 500, 120, 0.28, 0.24);
+  }
+
+  /**
+   * An ultimate going off. Deliberately the loudest and longest thing in here —
+   * it happens once a level and the whole point of it is that everybody notices.
+   *
+   * A rising arpeggio over a swell, so it does not get mistaken for the throne
+   * (which falls) or a wave starting (two notes, quiet).
+   */
+  ultimate() {
+    this.arpeggio([262, 392, 523, 784], 0.09, "square", 0.3);
+    this.tone("sawtooth", 90, 300, 0.55, 0.26);
   }
 
   structureDown() {

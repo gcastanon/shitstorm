@@ -1,4 +1,5 @@
 import Phaser from "phaser";
+import { Client } from "colyseus.js";
 import { NetClient } from "./net";
 import { ArenaScene } from "./ArenaScene";
 import { CHARACTER_IDS } from "../shared/types";
@@ -36,6 +37,72 @@ for (const id of CHARACTER_IDS) {
   btn?.addEventListener("click", () => start(id));
 }
 
+/**
+ * Grey out the seats somebody is already sitting in.
+ *
+ * One of each: three fighters, three seats, and one Dungeon Master. `onJoin`
+ * refuses all four cases — this is the part that stops you finding out by being
+ * refused.
+ *
+ * It has to come from **matchmaking metadata**, because the entry screen has not
+ * joined anything yet and so has no synced state to read. That makes it a
+ * snapshot rather than a live feed, which is why it is polled, and why the
+ * server still checks.
+ */
+const lobby = new Client(ENDPOINT);
+let seatTimer: ReturnType<typeof setInterval> | undefined;
+
+interface Seats {
+  taken?: Record<string, string>;
+  /** The Dungeon Master's name, or "" when that chair is empty. */
+  dm?: string;
+}
+
+async function refreshSeats() {
+  let seats: Seats = {};
+  try {
+    const rooms = await lobby.getAvailableRooms("arena");
+    // The room a join would land in. Colyseus fills an existing room before
+    // making a new one, so for the single room this game normally has, this is
+    // exactly it — and when there is no room at all, nothing is taken.
+    const room = rooms.find((r) => r.clients < r.maxClients);
+    seats = (room?.metadata as Seats) ?? {};
+  } catch {
+    // No server, or matchmaking is unreachable. Leave every card enabled rather
+    // than locking the player out of a game they might be able to join; the
+    // connect attempt will report the real problem.
+    return;
+  }
+
+  const taken = seats.taken ?? {};
+  for (const id of CHARACTER_IDS) {
+    markSeat(document.querySelector(`button[data-char="${id}"]`), taken[id]);
+  }
+  // The DM chair is one seat like any other, and the room refuses a second one
+  // with "this room already has a Dungeon Master" — so it greys out the same way
+  // rather than being the one option that lets you click it and find out.
+  markSeat(document.querySelector('button[data-role="dm"]'), seats.dm);
+}
+
+/** Grey a seat out and name its occupant, or hand it back. */
+function markSeat(btn: HTMLButtonElement | null, who: string | undefined) {
+  if (!btn) return;
+  btn.disabled = !!who;
+  btn.classList.toggle("taken", !!who);
+  // The name answers "why can't I click this" in one word. Anything longer
+  // belongs somewhere that is not a select button.
+  let tag = btn.querySelector("small");
+  if (who) {
+    if (!tag) { tag = document.createElement("small"); btn.appendChild(tag); }
+    tag.textContent = who;
+  } else if (tag) {
+    tag.remove();
+  }
+}
+
+void refreshSeats();
+seatTimer = setInterval(refreshSeats, 2000);
+
 // The Dungeon Master does not pick a character; the character sent alongside is
 // ignored by the server for this role.
 document
@@ -43,6 +110,9 @@ document
   ?.addEventListener("click", () => start("ranger", "dm"));
 
 async function start(character: string, role?: "dm") {
+  // Nothing to poll for once you are in, and a stray refresh would fight the
+  // arena for the buttons it no longer owns.
+  if (seatTimer) { clearInterval(seatTimer); seatTimer = undefined; }
   menu.classList.add("hidden");
   // The cabinet has the title on it in letters six inches high, so the small
   // page header only earns its place once the cabinet is gone.
@@ -53,8 +123,17 @@ async function start(character: string, role?: "dm") {
   try {
     await net.connect(ENDPOINT, character, nameInput.value.trim(), role);
   } catch (err) {
-    status.textContent = `could not connect: ${(err as Error).message}. Is the server running?`;
+    // A refusal the server actually spoke is not "is the server running?" — the
+    // commonest one now is somebody taking your character a moment before you.
+    const msg = (err as Error).message ?? "";
+    status.textContent = /taken|full|Dungeon Master/i.test(msg)
+      ? msg
+      : `could not connect: ${msg}. Is the server running?`;
     menu.classList.remove("hidden");
+    // Whatever just happened, the seats have moved. Show that immediately
+    // rather than leaving the card you were refused looking available.
+    void refreshSeats();
+    seatTimer ??= setInterval(refreshSeats, 2000);
     return;
   }
 

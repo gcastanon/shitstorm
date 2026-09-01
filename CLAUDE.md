@@ -839,6 +839,12 @@ screenshotted mid-bite shows only the body outline and the arcs.
 
 ## Boss fights: the Clog at 10, the Wellspring at 20
 
+> **Superseded in part.** The Wellspring was replaced by **the Gullet** — see "The Gullet replaces
+> the Wellspring at level 20" near the end of this file. Everything here about the Clog, the
+> difficulty slider, party health scaling and the skip button still stands; the Wellspring's own
+> section does not. Kept because the rulings table and the vacuous-pass notes are still the record
+> of why a boss is its own entity.
+
 Levels named in `boss.levels` replace their waves with one enormous thing. The level is won by
 killing it and lost if the timer runs out with it alive, so `boss.durationSec` replaces
 `level.durationSec` there. Both are still milestone levels, so they still pay an ultimate
@@ -1046,6 +1052,671 @@ timing a wall.
 - **Browser**: skipped to 10, then 20, killed the Wellspring, and the banner came up — chunky
   "YOU WON!", the rainbow and the wave both visibly moved between two screenshots a beat apart,
   "THE STORM IS BEATEN / FINAL SCORE 37,433" underneath, the DM panel standing down for it.
+
+## Mute that really stops, a HUD for players, and the restart button
+
+### Mute suspends the context; it does not turn it down
+
+`toggleMute` was setting the master gain to zero, which leaves every oscillator running and the
+music scheduler queueing notes nobody hears. It now stops the music and calls `ctx.suspend()`,
+and resumes on unmute. The gain still moves too, so the first frame after a resume cannot leak.
+
+**Two things had to change with it, and neither is obvious:**
+
+- **`unlock()` is called on every keypress**, since it exists to satisfy the gesture requirement
+  and cannot know which press is the first. Without a `!this.muted` guard the very next key after
+  `M` resumed the context that `M` had just suspended — silent, because the gain was zero, but
+  running, which is exactly the thing being fixed.
+- **`ArenaScene` passes `!this.sfx.muted` into `music.update`.** The scheduler is told every frame
+  whether it should be playing; stopping it inside `toggleMute` alone would have had it restart on
+  the next frame.
+
+### The HUD strip is for players now, and `F3` gets the rest back
+
+It carried fps, rtt, tick, pending commands, prediction error and six toggle states in front of
+everybody, all of it developer text. The split is by audience rather than by taste: level, score,
+time, wave, hp, lives, whether your pause is spent and how much town is left are always shown;
+everything else is behind `showDebug`, off by default.
+
+Nothing was deleted — the diagnostics have caught real bugs and the toggle-state readouts are how
+you tell whether `P` or `X` is currently on. `structures` reads as `town` in the visible strip.
+
+### Restart game
+
+`dm:restart` → `ArenaRoom.restartRun`, DM-only with the same sender check `dm:start` uses. It
+clears `pausedBy`, `forcedNextLevel` and `restartOnNextStart`, then calls `startLevel(1)` — which
+already means "fresh run" everywhere else in the room, so lives, score, perks, ultimates, the town
+and everybody's life state all come back on their own. **A restart is the wipe path without the
+wipe**, and deliberately not a new one; a second reset routine would drift out of step with the
+first the moment anything new became part of a run.
+
+It is a method rather than a closure in the handler, for the reason already in this file: a probe
+has to drive the real decision.
+
+**Clearing a live pause is not optional.** `startLevel` does not touch `pausedBy`, so restarting
+out of a paused room would have built level 1 and left it frozen, with the countdown stopped and
+the only person who could resume it possibly gone.
+
+Two clicks in `dmPanel`, arming for four seconds and then lapsing. It sits directly under two
+buttons that are not destructive, and it throws away a run with no undo.
+
+### Verified
+
+- `npm run verify` — `0.000000px`. Nothing in `src/shared` changed, but the restart goes through
+  `startLevel`.
+- **Restart probe**, driving the real `restartRun` from a run at level 14 with a build, a spent
+  pause, a dead player, a ruined town, an armed boss skip and 42,000 points: everything resets,
+  the room lands in `COUNTDOWN`, the tick advances again afterwards, and a player pressing it is
+  refused.
+- **Browser, two processes.** The audio state went `running → suspended → running` on the CDP
+  WebAudio domain, and **stayed suspended through a later keypress** — that is the `unlock` guard,
+  and it is the assertion worth keeping. The strip read `level 1 score 0 time 37s wave 1/4 LULL
+  2.5s hp 100 lives ●●● pause ready (ESC) town 16/16` with no diagnostics, `F3` brought them back
+  and removed them again.
+- **The first restart check was vacuous and is worth recording.** It clicked the button on a run
+  that was already at level 1 with no score, so "level 1, score 0" afterwards proved nothing. The
+  replacement plays level 1 out, takes a perk, arms a boss skip, and only then restarts: level 2 /
+  1,500 points / 1 perk / skip armed for 10 → level 1 / 0 / 0 / 0. Same trap as the pause
+  screenshot diff and the speed probe that measured a wall.
+- **Soak**: 3 bots, zero errors.
+
+## A level never runs with nobody in it
+
+A Dungeon Master alone in a room could start the game. Three ways in, and the
+first two were both reachable from the DM screen with no players connected:
+
+- **Pressing Start.** `dm:start` checked the sender and the outcome, and nothing else.
+- **Ticking Passive DM.** That drops the `requireDmToStart` gate, and `advanceIntermission`'s
+  WAITING branch then started the level with no further test.
+- **The last player leaving mid-level.** The room survives an empty player list for as long as a
+  DM is still connected, so the level kept running over an empty town.
+
+**The third one could never end.** `checkOutcome` requires `players.size > 0` — a guard that
+exists so a fresh room does not lose instantly — which means a level with nobody in it cannot be
+won *or* lost. It runs until somebody joins or the DM restarts it.
+
+`canStartLevel()` is the predicate, and it is deliberately about `state.players` rather than about
+clients: **the DM does not count and structurally cannot**, because the role was kept out of
+`state.players` from the start. That separation is what made this a two-line fix instead of nine.
+
+The other direction is a separate guard in `onLeave`, not the same one, so both were checked
+independently. It sets `restartOnNextStart` before parking, because an armed boss skip can
+redirect `awaitStart` away from level 1 and `startLevel` reads "fresh run" off the level number —
+without it, the next person to arrive would inherit the abandoned run's score.
+
+`restartRun` parks at the start screen rather than starting, when it is pressed in an empty room.
+The reset is deferred rather than skipped: `pendingLevel` 1 makes the eventual `startLevel` a
+fresh run anyway.
+
+The DM's Start button reads **"Waiting for a player to join"** and is disabled, and the footer
+says so too — a server that silently refuses a live-looking button is the same class of problem
+as a prompt naming the wrong key.
+
+### Verified
+
+- **Empty-room probe**, driving the real `fixedTick`, `onLeave` and `restartRun`: 600 ticks with a
+  passive DM alone stays WAITING; a player joining that room goes COUNTDOWN → PLAYING; Start is
+  refused empty and accepted with one player; the last player leaving mid-level parks it and it
+  stays parked for 300 ticks; the next arrival gets level 1 at score 0, not the abandoned run.
+- **Both guards were disabled in turn to confirm the probe fails without them** — stubbing
+  `canStartLevel` to `true` produced 5 failures, disabling the `onLeave` branch produced 3
+  (including the abandoned score at 5,000). A guard nobody has watched fail is not verified.
+- **The probe's own setup assertions caught it being vacuous first.** Two blocks asserted things
+  about a level that had never started, because a fresh harness has an *active* DM holding the
+  door and ticking alone leaves it in WAITING. `beginLevel()` exists for that.
+- `npm run verify` — `0.000000px`. **Soak**: 3 bots, 150s, no errors — the case worth watching,
+  since the soak depends on a room with no DM starting on its own.
+- **Browser**: a DM joining an empty room saw a disabled "Waiting for a player to join", clicking
+  it anyway left the room on the start screen, and ticking Passive DM still did not start it after
+  four seconds. A druid then joined and the level ran — `level 1 score 0 time 42s`.
+
+## The DM's roster
+
+Who is in the room, live, at the top of `#dm-live`. The summary table only
+exists *between* levels, so during one the DM could not see who was connected, who was on the
+floor, or whether a seat had quietly emptied — and since a level now cannot start without a
+player, an empty seat is the difference between a run that proceeds and one that does not.
+
+**Nothing was added to the wire format.** `name`, `character`, `health`, `maxHealth`, `lifeState`,
+`skulls`, `carriedBy` and `hasPicked` are all already synced for other reasons, so this is a pure
+client-side read — the same stance as every other piece of presentation in the project.
+
+- **Empty seats are drawn**, dimmed, rather than only counted. `1/3` is a number the DM has to
+  notice; two grey rows are a shape they cannot miss.
+- **The dot is the character's own tuning colour**, the one the cabinet and the sprite already
+  use, so a row is identified at a glance rather than read.
+- **A downed player shows skull pips, not health.** Health is zero by definition down there;
+  skulls are what is actually about to kill them.
+- **Health bars use `drawHealthBar`'s 0.5 / 0.25 thresholds**, so they recolour at the same
+  points as every other health readout in the game.
+- Between levels the condition column flips to `choosing…` for anyone who has not picked — the
+  same question the Start button is gated behind.
+- Memoised on a key of the fields it renders, like `DmPanel`'s table and `PerkScreen`. `update()`
+  runs every frame, and rebuilding this DOM at 60fps is what made this page unresponsive the
+  first time.
+
+### Verified
+
+- **Browser, three processes**, reading the rendered DOM rather than the state behind it: an
+  empty room shows `0/3` and three open seats; a named warlock joining shows `Gil warlock
+  100/100` with a red dot and two seats left; a druid joining makes it `2/3` with a distinct
+  violet dot; damage moves the row to `hurt` and the bar to 40%; going down flips it to `down
+  ···`; a skull turns it to `down ☠··`; a disconnect drops the row and returns the seat.
+- **Two probe assumptions were wrong, not the code.** It expected the warlock at 120/120 —
+  `onJoin` has always used `player.startHealth` (100), not the character's `maxHealth`. And the
+  temporary `debug:hurt` hook clamped its own damage with a stray `Math.max(1, health - hp)`, so
+  the "kill him" step did 1 damage and the downed row was never reached; the run before the fix
+  reported the roster broken when it was the probe.
+- A temporary `debug:hurt` message and the `window.__net` hook made the downed and skull states
+  reachable. **Both are removed**, as the discipline above requires.
+- `npm run verify` — `0.000000px`. `npm run build` clean. **Soak**: 3 bots, 120s, no errors.
+
+## One of each seat
+
+Four seats — three fighters and the Dungeon Master — and one occupant each. A seat somebody is
+already in is greyed out on the cabinet with their name under it, and the server refuses it
+outright.
+
+**The DM chair is a seat like any other and must stay one.** `onJoin` has always refused a second
+Dungeon Master (`this room already has a Dungeon Master`), but the button was the one option that
+let you click it and find out. `markSeat()` handles all four, and the `.taken` style is keyed on
+`#menu button.taken` rather than `.chars button.taken` so it covers the DM's button too.
+
+**A cabinet describing the fighters was tried first and rejected by the designer as clutter.** The
+entry screen is meant to be a row of three bright cards, not a spec sheet — do not re-add
+descriptions, ultimate lists or role blurbs to it. What was actually wanted was this: the option
+you cannot take should not look like an option.
+
+### The check that decides is on the server
+
+`onJoin` looks up `playerByCharacter` and throws. That is the only thing that actually enforces
+one-of-each, and it has to be, because the cabinet's information is a matchmaking snapshot that
+can be a moment stale and two people can click the same card at the same instant.
+
+The refusal names who has it, and `main.ts` no longer wraps every join error in "Is the server
+running?" — that sentence is nonsense for a message the server just spoke.
+
+### The greying-out reads matchmaking metadata, and it has to
+
+The entry screen has not joined anything, so it has **no synced state at all** — this is the one
+screen in the game that cannot read `GameState`. `setMetadata({ taken, dm })` publishes the seats
+to matchmaking and `client.getAvailableRooms("arena")` reads them back, polled every 2s.
+`publishSeats()` is called from every path that changes who is sitting where: a player joining,
+the DM joining, and both kinds of leave.
+
+Two consequences worth knowing:
+
+- **A poll, not a feed.** There is no push channel before you join, so a card can be up to two
+  seconds stale. That is exactly why the server check exists rather than being redundant.
+- **It picks the room a join would land in** — the first with space, which is what Colyseus fills
+  before making a new one. With the single room this game normally has, that is the room. If
+  matchmaking is unreachable it leaves every card enabled rather than locking a player out of a
+  game they might be able to join; the connect attempt then reports the real problem.
+
+The polling stops on join and restarts if the join is refused, so a card you were just refused
+does not sit there still looking available.
+
+### Verified
+
+- **Seat probe**, driving the real `onJoin` and `onLeave`: a second druid is refused with a
+  message naming Ana, and the room still has one player; the other two characters are unaffected;
+  the seat frees the moment its holder leaves; **the DM joining with `character: "druid"` does not
+  hold the druid** (the role ignores the character it is sent, and that had to be asserted rather
+  than assumed); the published metadata gains and loses entries on join and leave, including the
+  DM's; and a garbage character id still falls back to the ranger *and* occupies that seat.
+- **Stubbing the guard out produced 7 failures**, so the probe is not vacuous.
+- **Browser, three cabinets**: an empty room disables nothing; Ana joining as druid turns that
+  card grey and dashed with `Ana` under it while the other two keep their colours; clicking it
+  does nothing; a free character still joins; a third cabinet sees two taken; and Ana
+  disconnecting brings the druid back with the stale name gone. Screenshot read.
+- **The DM chair, same shape**: free and gold with nobody in it; grey, dashed and reading `Gil`
+  once he takes it; the three fighters untouched by a DM being present; clicking it does nothing;
+  gold again when he disconnects, with the name gone — **and then actually takeable**, which is
+  the assertion that separates "greyed out correctly" from "greyed out permanently".
+- `npm run verify` — `0.000000px`. `npm run build` clean. **Soak**: 3 bots, 120s, no errors —
+  worth watching here, because the bots would now be refused if they picked the same character.
+
+## The Gullet replaces the Wellspring at level 20
+
+The Wellspring was passive twice over — it pumped ordinary sewage from a different origin, and its
+healing was something that happened *to* the players rather than something they acted on. It was
+also the last thing a run ever showed you.
+
+**The Gullet** is a slavering mouth in the town square that *summons* sewage to itself in dense
+patterns and heals off everything that reaches it. For nineteen levels sewage is a thing you
+dodge; here it is a thing you have to go out and stop. That inversion is the whole point.
+
+### Patterns are made of straight lines, and that is not a compromise
+
+Chunks are extrapolated client-side along a straight line from the newest snapshot, and that is
+exact only because "chunks never accelerate or curve". A homing or curving tribute chunk would
+desync and stay desynced.
+
+So **the shape comes from where and when chunks are emitted, never from a curved path** — the
+bullet-hell trick, where a rotating emitter firing straight shots traces a spiral. Three patterns,
+cycled deterministically:
+
+| | |
+| --- | --- |
+| **Spiral** | One chunk per step, bearing advanced `turnDeg` each time |
+| **Spokes** | `count` chunks at once on even bearings, the set rotated a little per volley |
+| **Wall** | A contiguous arc of `count` over `arcDeg`, fired together, the bearing jumping per volley |
+
+**No RNG anywhere in it.** A pattern that is random is not a pattern, and it makes the fight
+identical every run the way the seeded town already is. The emitter's bearing carries over between
+patterns rather than resetting, so it sweeps continuously instead of snapping.
+
+`stepAsteroid` was not touched, nothing in `src/shared` changed shape, and `npm run verify` is
+still `0.000000px`. That is the payoff for the constraint.
+
+### Three numbers that are load-bearing
+
+- **`summonRadius` 700.** `isOutOfPlay` culls at `offscreenMargin * 2` = 160px beyond the arena. A
+  700 ring around (800, 600) reaches y = −100 and y = 1300, both inside that. Past ~750 the top
+  and bottom of every pattern is deleted the instant it spawns — silently. The probe walks all 360
+  bearings and asserts none is culled.
+- **`tributeSpeed` 130, its own number.** Tier speed at level 20 is ~400–630px/s after the level
+  multiplier, which crosses the ring in about a second: unreadable and impossible to intercept.
+  `AsteroidSystem.spawnAt` gained an optional speed override that bypasses the tier range *and*
+  the level multiplier; omitting it leaves the Clog's shedding exactly as it was.
+- **Peak is 75 chunks against `maxAlive` 90.** `spawnAt` returns silently at the cap, so denser
+  patterns would not error — they would just quietly stop arriving. That is the headroom.
+
+### Cover blocks tribute, and the town is eaten alive
+
+Settled with the designer, and it needed no code: `consumedOnWallHit` was already true, so the
+town is a shield around the boss's food. Measured — 72 shots fired from the ring: **58 reached it
+across open ground against 8 through an intact town.**
+
+Over a full 120s fight the town goes from **16 standing to 0**, so the shield erodes completely
+within the fight and the pressure escalates on its own with no phase logic doing it. Consecrate,
+Ramparts and Salvage are genuinely powerful for this one level. Players block tribute too, since
+`consumedOnPlayerHit` is already true — taking a chunk to deny a heal is a real choice.
+
+Other things that suddenly matter, all by construction: Reckoning reverses tribute *away*, Slow
+the Storm buys seconds against everything in flight, Devour eats an incoming arm, and a throne
+parked on the Gullet bounces tribute off the shell.
+
+### ⚠ Waves are now off on BOTH boss levels, and level 10 changed
+
+The docs claimed "boss levels replace their waves" from the day bosses were added. **The code
+never did it** — `asteroids.update` runs unconditionally, so 10 and 20 ran a boss *on top of* full
+waves. For the Gullet that would have been fatal: waves aim at the town centre, which is exactly
+where it sits, so it would have healed off chunks nobody summoned and players could not reliably
+intercept.
+
+`AsteroidSystem.wavesEnabled` is set in `startLevel`. **This is a real balance change to a Clog
+fight that already worked**, measured over a 45s window, 8 seeds, 3 idle players:
+
+```
+                       waves on    waves off
+chunks spawned            200.0         40.0
+peak sewage on screen      28.5          3.9
+cover lost (of 16)          8.1          7.5
+```
+
+Cover loss barely moved because the Clog's razing was doing nearly all of it. What changed is the
+storm around the fight: level 10 is now a duel with the Clog rather than a duel in a downpour.
+**Deliberately not retuned** — `clog.shedSec` (1.1) is the knob, and roughly 0.16 would restore the
+old on-screen density. That is a separate decision. Levels 1–9 are untouched: `hitcheck` still
+reports 0.9 hits, peak 21.6, cover 16.0/16.
+
+### Numbers, and one thing worth knowing about the old boss
+
+`hp` is **1400**, which is 4200 at three players. The probe now prints the party's whole damage
+budget so the number is not a guess: ~46.7 dps uninterrupted, ~5600 damage across the 120s — so
+4200 leaves headroom for about 117 chunks fed before it becomes unwinnable.
+
+**The Wellspring's 3000 base was 9000 at three players, against that same ~5600 budget.** It was
+very likely unkillable by a full party, which may be much of why it felt bad. Not investigated
+further; recorded because it is the kind of thing that explains a design complaint.
+
+### Naming
+
+`BOSS_GULLET = "gullet"`. Devour's *upgrade* id is also `gullet` — different namespaces, an
+upgrade id is never compared against a boss kind, so there is no runtime conflict, but both carry
+a comment because grepping the word finds both.
+
+Sprite radius **72**, a 144px diameter, even as `PIXEL = 2` requires. Teeth are drawn as stacks of
+shrinking rows walking inward along each bearing — that is how you get a triangle on a pixel grid
+without rotation, which would land on half pixels — and every one is clipped inside the collision
+radius by `ellipseIn`, so decoration still never looks bigger than the hitbox.
+
+### Verified
+
+- `npm run typecheck`, `npm run verify` — `0.000000px`, `npm run build` clean.
+- **Gullet probe**, driving the real room: patterns emit 1 / 10 / 14 per step, the wall spans
+  exactly 90°, the spiral turns exactly 26° per step, all three appear within 60s; every chunk's
+  velocity points at the centre to within 0.0000 rad at exactly 130px/s; 0 of 360 ring bearings
+  are culled at spawn; a chunk in the mouth is removed and heals exactly `healPerChunk`; one 8px
+  outside is left alone; healing clamps at `maxHp`; the slider scales both healing and health
+  live; health scales with the party; phase latches at half and survives a heal to full; a kill
+  ends the run in VICTORY and the timer with it alive is a LOSS.
+- **Stubbing the drink out produced 5 failures**, including the "the control could not have
+  failed" guard built into the cover test. The probe is not vacuous.
+- **Browser, two processes**: skipped to 10 then 20, the Gullet appeared at 1400/1400 with its bar
+  reading `THE GULLET`, the HUD showed `BOSS` instead of a wave counter, 24→41→30 chunks converging
+  on screen, and the hitbox outline landed exactly on the sprite edge with `H` on.
+- **The first browser heal check was vacuous** — it watched the bar at full health, where healing
+  clamps and cannot show. Rewritten to swing at the Gullet for 9s first: `1322 → 1334 → 1382 →
+  1400`, climbing in 12s, which is `healPerChunk` exactly.
+- **The soak cannot reach level 20 and that is a limitation of the soak.** Bots never aim at a
+  boss, so they lose at the Clog every run, even with boss hp dropped to 150. Three bots ran
+  clean through level 10 twice with waves suppressed and no errors; the full-length fight is
+  covered by a 120s headless run instead — peak 75/90 chunks, 1506 spawned, town 16 → 0, no throw.
+
+## The Clog sheds when it is hit
+
+Every hit has a `hitShedChance` of knocking a chunk loose. Rolled in
+`BossSystem.rollHitShed()` and spawned by `hurtBoss`, which was already the single funnel every
+source of boss damage goes through — melee, arrows, the grapple anchor, Devour, Reckoning.
+
+**This is what fills the arena now, instead of a flat timer.** Pressure tracks how hard the party
+is actually fighting: standing off the Clog keeps the screen clear and costs you the level, and
+laying into it buys the damage with sewage. It also answers the density hole that came with
+switching waves off, and it answers it in the right place — the flat `shedSec` would have put the
+storm back whether or not anybody was fighting.
+
+Measured over 45s, 8 seeds:
+
+```
+                          chunks   peak on screen
+waves on, idle             200.0             28.5   (before waves were suppressed)
+waves off, idle             40.0              3.9   (the hole this fills)
+waves off, party fighting  139.5             11.3   (now)
+```
+
+The earlier baseline could not see any of this, because it used **idle** players who never
+attack — so it had to be re-measured with damage driven on the real party cadence, two melee at
+their cooldown plus a bow at half that.
+
+### Two things it must not do
+
+- **The Gullet must never shed on hit.** It sits on top of whatever appears at its own position
+  and would swallow it the same tick, healing itself for being attacked. The guard is a kind
+  check, and dropping it in a probe run produced **1723 sheds in 5000 hits** — so it is the single
+  most load-bearing line in the feature.
+- **`hitShedMinSec` is not defensive padding.** Every arrow is its own damage event, so Arrow
+  Storm lands 36 on one tick and Windrunner sustains ~90 a second for eight seconds. Without a
+  floor one ultimate buries the screen and `spawnAt` starts silently dropping chunks at
+  `maxAlive`. At 0.12s a 36-arrow volley sheds **1**, and Windrunner's eight seconds shed 55
+  against a ceiling of 67 — so it caps the volleys and barely touches a melee pair at 6.7 hits/sec.
+
+The roll happens **before** the damage is applied, so a killing blow can still spit — the mass is
+coming apart, and the last hit is the one most likely to be doing it.
+
+`hitShedTick` is an absolute server tick rather than a countdown, because damage arrives from
+outside the boss update and there is no `dt` to subtract there. Same reason `invulnUntilTick` and
+`ultEchoTick` are absolute.
+
+### Verified
+
+- **Shed probe**, driving the real `rollHitShed` and `hurtBoss`: 34.5% of 20,000 hits against a
+  tuned 35%; a 36-hit tick sheds 1; Windrunner's 8s sheds 55 under a 67 ceiling; **the Gullet
+  sheds 0 in 5000 hits**; a dead Clog sheds 0; and a hit through `hurtBoss` really does put a
+  chunk in the air with the spawn counters advancing.
+- **Dropping the Clog-only guard produced the Gullet failure above**, so that assertion is not
+  vacuous.
+- `npm run verify` — `0.000000px`. `npm run build` clean.
+
+## Abilities you can see
+
+The Druid's Devour says "the maw opens wide", eats everything within **296px** (474 with Gullet),
+and drew nothing at all. Auditing the rest found the gap was much wider.
+
+### What the audit found
+
+Specials were fine — the throne draws its shell at the exact reflect radius, the grapple draws
+rope and hook, the swallow draws a ring. **Ultimates were 1 of 9.** Only Cathedral drew anything.
+Four (Reckoning, Arrow Storm, Windrunner, Rebirth) had self-evident world effects but nothing
+marking the cast; Slow the Storm and Consecrate were partly invisible; **Devour and Grove were
+completely invisible** — Grove swallows the whole team for 4s of invulnerability and looked
+exactly like eating one ally.
+
+Two cross-cutting finds:
+
+- **No ultimate made a sound or an effect.** `audio.ts` had nothing for them, `EventDiffer` had no
+  ultimate event, and **`fired.ultimateFired` was never handled anywhere in the client**. Pressing
+  Shift produced an emptying cooldown arc and nothing else — for the once-per-level ability.
+- **A dead sync.** `coverReflects` has been `@type("boolean")` since Spires was built, carrying the
+  comment *"Synced so the client can draw warded cover differently"*. Nothing ever read it.
+
+### The organising rule
+
+Two categories, so nothing gets missed and nothing gets invented twice:
+
+- **Every ultimate gets a cast moment** — sound, burst in the caster's colour, 120ms shake.
+- **Every *durational* ultimate marks its caster for its whole duration.** Cathedral already did;
+  Devour, Grove, Slow the Storm and Windrunner now do. The four instant ones need only the cast.
+
+### The cast needed a counter, not a diffed cooldown
+
+`EventDiffer` infers abilities from counters going up, and **nothing existing could carry this**:
+`ultTicks` stays 0 for the four instant ultimates, and `ultReady` falls only on the *first* cast —
+so an Echo or Rally firing again three seconds later was undetectable either way.
+
+`Player.ultCasts`, one `@type("uint8")`, incremented in `fireUltimate` — already the single funnel
+every cast and every echo passes through. Compared with `!==` rather than `>` so the byte wrapping
+past 255 still reads as a cast.
+
+**It is emitted for the local player too**, unlike every other ability in `EventDiffer`. Your own
+first cast comes from the predictor so it lands on the frame you press it, but an Echo fires with
+no input behind it and the predictor cannot know — so the scene drops the duplicate with a 900ms
+window, comfortably longer than a round trip and far shorter than Echo's three seconds.
+
+### Devour: one shared radius, then a spinning maw
+
+`devourReach()` moved into `src/shared/ultimates.ts` and both sides call it. Same rule
+`throneBubbleRadius` and `cathedralRadiusMul` already follow: the server used to compose it inline
+in `tickDevour`, which is exactly how the two drift.
+
+The maw grows to that radius and **spins at 3.5 rev/s**, chewing four times a revolution. The spin
+is the honest part: Devour eats in a full circle, so a big mouth pointing along aim would promise a
+cone. Whirling it makes the swept area the eaten area, with no extra ring drawn.
+
+**The hinge must not scale, and the first version got this wrong.** Scaling the hinge along with
+the jaws flung the mouth out to the rim, where it read as a pink slab orbiting the Druid rather
+than a mouth opening from them. The hinge stays at `radius + 5` and only the jaw length scales,
+by `(reach - hinge) / MAW_JAW_PX` — 8.5× at 296, 14.1× at 474.
+
+Devour's radius is also now on the `H` overlay. `H` is the contract that shows the truth and
+Devour had none to show.
+
+### Verified
+
+- `npm run typecheck`, `npm run verify` — `0.000000px`, `npm run build` clean.
+- **Probe**: `devourReach` against what `tickDevour` *actually* eats, found by binary-searching a
+  chunk's distance through the real method rather than recomputing the formula — 296.0/296.0 and
+  473.6/473.6. `ultCasts` bumps for all nine, bumps again on an Echo while `ultTicks` stays 0
+  throughout, and wraps 255 → 0.
+- **A shared function makes the agreement test vacuous on its own, and this caught it.** Stubbing
+  `devourReach` to return the plain reach left both sides agreeing at 74 vs 74 — the *sanity*
+  assertions ("it should be much larger than ordinary reach", "Gullet should grow it") are what
+  went red. Worth remembering when testing anything both sides derive from one function.
+- **Browser, all twelve cases** through a temporary `debug:ult` hook: every one bumped `ultCasts`,
+  Consecrate reported `warded true/false` and Spires `true/true`, Grove swallowed an ally. Two
+  frames a beat apart confirm the maw really rotates and chews. Screenshots read. **Hook removed.**
+- **The probe's own Echo assertion was wrong first time** — it demanded three distinct cast counts
+  when one press produces exactly two, the press and the echo. The data (`1 1 1 1 1 2 2 2 2 2`)
+  was right; the expectation was not.
+- **Soak**: 3 bots, 420s. The first 160s run reached only level 4 and exercised nothing, because
+  ultimates unlock at 5 — the longer run used **nine ultimates across all three classes** with no
+  errors. A soak that never reaches level 5 says nothing about this.
+
+## Skip to any level
+
+> **Superseded by the section below.** The two boss buttons became a number box:
+> `bossName` and the validation-not-correction stance survive, the buttons do not.
+
+## The DM picks which boss to skip to
+
+One button per boss level instead of a single "next boss". The old one worked from
+`nextBossLevel`, so from level 12 it could only ever offer 20 — going back to the Clog to test a
+change to it meant restarting the run first.
+
+`skipToBoss(sessionId, level?)` takes the level now. **It still validates**: a level that is not in
+`boss.levels` falls back to the next boss rather than being obeyed, so a message cannot send the
+run somewhere that is not a boss fight. Omitting the level keeps the old behaviour, which is what
+makes the change backwards-compatible with anything still sending the bare message.
+
+The buttons are built from `tuning.boss.levels` and named through `bossKindFor` + `bossName`, so a
+third boss level would grow its own button with nothing in `dmPanel` to change, and a button
+cannot label itself as the wrong fight.
+
+**`bossName(kind)` is new in `src/shared/boss.ts`** because the display string had already been
+copied into the health bar and the difficulty label, and this would have been a third. All three
+read it now.
+
+### Verified
+
+- **Skip probe**, driving the real `skipToBoss`: both boss levels are armable from levels 1, 3, 9,
+  10, 12, 20 and 24; **asking for 10 from level 12 works**, which is the case the old button could
+  not do; non-boss levels (7, 11, 0, −5, 999) are all refused and fall back; omitting the level
+  reproduces the old behaviour; pressed while waiting it retargets `pendingLevel`; a player is
+  refused; and the run actually arrives — armed 10 lands on the Clog, armed 20 on the Gullet,
+  driven through `endLevel` and the intermission where the `awaitStart` bug used to live.
+- **Stubbing the choice out produced 11 failures**, including `level 20 spawned "clog"`.
+- **Browser**: two buttons reading `Skip to THE CLOG (level 10)` and `Skip to THE GULLET (level
+  20)`, neither armed at first; clicking the Gullet armed only it; clicking the Clog moved the
+  arming; the run then landed on 20 with the Gullet. Screenshot read.
+- `npm run verify` — `0.000000px`. `npm run build` clean.
+
+## Two more sewage types, at levels 5 and 15
+
+Levels used to differ only in speed and density. Two new tiers give a run something new to learn
+partway through:
+
+| | |
+| --- | --- |
+| **crust**, from level 5 | Armoured: two hits, then two Small. Four hits to clear one |
+| **bolus**, from level 15 | One hit and it is two **Large**, which split again. Seven hits and four fragments from one spawn |
+
+### The tier pair became a tier table
+
+`Tier` was `0 \| 1` and `tierName` was a ternary. Both are a table now, because two more hard
+ternaries in `splitAsteroid`, `spawn` and the sprite lookup is how this rots. Each tier's tuning
+block carries its own rules — `hits`, `splitsInto`, `fromLevel`, `weight` — so a decision lives
+beside the numbers rather than in a third place.
+
+`weight` + `fromLevel` replaced `spawn.largeChance`.
+
+**`TIERS` order is load-bearing.** `pickTier` walks it, and with `large` first and the two original
+weights summing to 1, a level below 5 draws **bit-identical** to the `rng() < largeChance` it
+replaced. That is why `hitcheck` still reports 0.9 hits / peak 21.6 / cover 16.0/16 exactly.
+Reordering that array would silently reshuffle every seeded run.
+
+### `splitById` became `hitById`, and `hits` had to go on the wire
+
+A hit no longer necessarily breaks anything, so the old name was a lie. It decrements `hits` and
+only removes and spawns children at zero.
+
+`Asteroid.hits` is `@type("uint8")` — **synced**, unlike everything else about a tier, because it
+is the one thing that varies per chunk and because "why didn't that die?" is the first question the
+armoured type provokes. The client swaps to a cracked sprite once it drops.
+
+A chunk that survives is stamped with the swing that hit it, exactly as children are, so one melee
+sweep cannot strip both layers. **Arrow Storm's 36 arrows are 36 separate hits and will** — an
+ultimate behaving like one, noted rather than guarded.
+
+### Demolition and Barbed were already right; their text was wrong
+
+`resolveAttack` does `if (m.destroyLarge) removeById(target.id)` regardless of tier, so
+destroy-outright has always removed whatever it hit. The cards said "Large chunks", which was loose
+before and would have been actively wrong from level 15. **The text changed, not the code.**
+Doubling was the one genuinely Large-only rule and now reads "anything with a `splitsInto`".
+
+### Measured, because the chain was the risk
+
+`hitcheck` gained a per-level sweep. Idle players, 8 seeds, 45s:
+
+```
+  level   hits   peak/90  cover      alive at the end, by tier
+      1    0.9    21.6   16.0/16     large 3.5  small 4.1     <- the recorded baseline, unmoved
+      5    2.1    21.8   16.0/16     large 1.5  small 3.6  crust 1.0
+     15    4.6    24.1   14.4/16     large 1.4  small 1.9  crust 1.1  bolus 1.0
+     20    7.9    30.5   11.3/16     large 1.9  small 1.6  crust 1.8  bolus 1.3
+```
+
+**Idle players never break a bolus, so those peaks cannot see the chain at all.** Driven with three
+players swinging at their real rates instead: peak **5.4 → 14.4 → 48.1 → 58.5** at levels 1/5/15/20,
+against a `maxAlive` of 90. So attacking a bolus field genuinely fills the screen, and still does
+not hit the cap. Not tuned in this pass.
+
+Worth noting for the long-standing cover-erosion question: cover finally moves at high levels —
+14.4/16 at 15 and 11.3/16 at 20, where it was 16.0/16 everywhere before.
+
+### Verified
+
+- `npm run verify` — `0.000000px`. `npm run build` clean.
+- **`hitcheck` is the regression gate and it reproduced level 1 exactly**, down to the per-player
+  health strings.
+- **Tier probe**: every diameter even; 200k draws per level give 44.9/55.1 below level 5, no crust
+  before 5, no bolus before 15, both present after; a crust survives hit one with `hits` down and
+  gives two Small on hit two; a bolus gives two Large; the whole chain is 7 hits ending in 4 Small
+  at 1.322× its speed; one swing cannot double-hit a survivor; every tier breaks into what its
+  tuning says; `removeById` takes a crust and a bolus outright.
+- **Forcing `tierHits` to 1 produced 3 failures.** Note the printed summary line was *identical*
+  either way — the assertions did the work, not the output.
+- **Browser**: all five sprites in a row (large, small, crust, cracked crust, bolus), each hitbox
+  outline landing exactly on its edge with `H` on; then a real level 15 sampled 14 times over 21s
+  saw all four tiers. **The first attempt failed on the sample, not the code** — one snapshot of
+  five chunks against a 12.7%-weight tier proves nothing.
+- **Soak**: bots never damage a boss, so no soak gets past level 10 while one exists. With
+  `boss.levels` temporarily emptied they reached **level 26** with zero errors, which is what
+  actually exercises the bolus chains. Every temporary tuning override was restored and checked
+  back to its shipped value.
+
+## Skip to a level the DM types
+
+The two boss buttons became a number box and one **Skip**. Boss levels are no longer the only
+places worth reaching — level 5 is where the armoured crust starts and 15 where the bolus does —
+and a debugging tool should go where you point it.
+
+`dm:skipToBoss` → `dm:skipToLevel`, and `skipToBoss(sessionId, level?)` → `skipToLevel(sessionId,
+level)`. Both paths through `endLevel` and `awaitStart` are unchanged; only the target is.
+
+### It refuses rather than corrects
+
+A level outside `1..MAX_SKIP_LEVEL`, a fraction, `NaN`, `Infinity` — all rejected outright, and
+importantly **a rejected skip leaves an existing arming alone**. Clamping would have been one line
+shorter and wrong: a debugging tool that quietly sends you somewhere other than where you asked is
+worse than one that does nothing. The probe asserts the refusal *and* that the previous arming
+survives it.
+
+`MAX_SKIP_LEVEL` is 999, well inside `forcedNextLevel`'s uint16, so a typo cannot arm level 40000
+and leave the room waiting for it forever.
+
+### The caption says what is at the target
+
+Built from the same tables the game spawns from: `isBossLevel`/`bossName` for a boss, and each
+tier's own `fromLevel` for the new sewage — so it reads `(THE GULLET)` at 20, `(crust starts here)`
+at 5, `(bolus starts here)` at 15, and nothing at 7. It cannot promise the wrong thing because it
+is reading the same numbers the spawner does.
+
+**The number box is never written to from the panel.** It is a field the DM is typing in, and
+correcting it from synced state every frame would fight their keystrokes — the same reason the
+difficulty slider is left alone mid-drag.
+
+**`nextBossLevel` is deleted.** Nothing needed it once the fallback went, and leaving a function
+that nothing calls is what the Masons perk was.
+
+### Verified
+
+- **Skip probe**, driving the real `skipToLevel`: 11 targets from 4 different current levels all
+  arm; 0, −1, −50, 1000, 5000, 1.5, `NaN` and `Infinity` are all refused with nothing armed; a
+  refused skip leaves an earlier arming intact; pressed while waiting it retargets `pendingLevel`;
+  a player is refused; and the run really arrives at 2, 5, 10, 15 and 20 with the right boss (or
+  none), driven through `endLevel` and the intermission.
+- **Replacing the guard with a clamp produced 9 failures**, which is the assertion that the
+  refuse-don't-correct stance is real and not just a comment.
+- **Browser**: the caption named the Clog at 10, crust at 5, bolus at 15, the Gullet at 20 and
+  nothing at 7; Skip armed 13 and the button read `Armed: 13`; typing 15 and pressing Enter
+  retargeted it; the run landed on 15 with crusts alive on screen.
+- **The first browser run failed on my own input helper**, not the code — a triple-click select
+  left `1013` in the box, the server clamped it to 999, and every caption assertion then
+  "failed" while describing 999 perfectly correctly. Set `.value` and dispatch `input` instead of
+  typing into a number field.
+- `npm run verify` — `0.000000px`. `npm run build` clean.
 
 ## Next
 

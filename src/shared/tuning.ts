@@ -129,12 +129,23 @@ export interface WavesTuning {
 }
 
 export interface TierTuning {
+  /** Diameter must stay EVEN. pixels.ts bakes sprites at radius*2/PIXEL art
+   *  pixels, and an odd diameter drops the whole game's art grid to 1px. */
   radius: number;
   speedMin: number;
   speedMax: number;
   playerDamage: number;
   wallDamage: number;
   skullsWhenDowned: number;
+  /** Hits this tier survives before it breaks. 1 for all but the armoured one. */
+  hits: number;
+  /** The tier name it breaks into, or "" for nothing. A bolus names "large",
+   *  which then splits again — that chain is the point of it. */
+  splitsInto: string;
+  /** The level this tier starts being spawned at. */
+  fromLevel: number;
+  /** Relative spawn weight among the tiers a level has unlocked. */
+  weight: number;
 }
 
 export interface Tuning {
@@ -143,7 +154,7 @@ export interface Tuning {
   boss: {
     /** Level numbers that are boss fights instead of waves. */
     levels: number[];
-    /** The clog/wellspring hp values are for one player. Each extra player
+    /** The clog/gullet hp values are for one player. Each extra player
      *  present at spawn adds this much of the base again. */
     hpPerExtraPlayer: number;
     /** Replaces level.durationSec on a boss level. */
@@ -160,10 +171,32 @@ export interface Tuning {
       hp: number; radius: number; speed: number; shedSec: number;
       phaseAtHealthFraction: number; phaseSpeedMul: number; phaseShedMul: number;
       razeSec: number;
+      /** Chance that any single hit knocks a chunk loose. */
+      hitShedChance: number;
+      /** Floor between hit-sheds, so a 36-arrow volley cannot bury the screen. */
+      hitShedMinSec: number;
     };
-    wellspring: {
-      hp: number; radius: number; pumpSec: number; pumpCount: number;
-      healPerStructureLost: number;
+    /**
+     * The Gullet. Every pattern is made of ordinary straight-line chunks emitted
+     * from a rotating bearing on the `summonRadius` ring — the shape comes from
+     * when and where they leave, never from a curved path, because clients
+     * extrapolate chunks along a straight line.
+     */
+    gullet: {
+      hp: number;
+      radius: number;
+      /** Ring the tribute appears on. Constrained by isOutOfPlay — see tuning.json. */
+      summonRadius: number;
+      /** Tribute's own speed, deliberately not the tier's. */
+      tributeSpeed: number;
+      /** Healing per chunk that reaches it, before the DM's difficulty slider. */
+      healPerChunk: number;
+      phaseAtHealthFraction: number;
+      /** Every pattern's interval is multiplied by this once enraged. */
+      phaseEveryMul: number;
+      spiral: { everySec: number; steps: number; turnDeg: number };
+      spokes: { everySec: number; steps: number; count: number; turnDeg: number };
+      wall: { everySec: number; steps: number; count: number; arcDeg: number; turnDeg: number };
     };
   };
   score: {
@@ -208,13 +241,17 @@ export interface Tuning {
   asteroids: {
     large: TierTuning;
     small: TierTuning;
+    /** Armoured, from level 5: two hits, then two Smalls. */
+    crust: TierTuning;
+    /** From level 15: one hit and it is two Large, which split again. */
+    bolus: TierTuning;
     split: { childCount: number; spreadDegrees: number; speedMultiplier: number; childrenImmuneToSameSwing: boolean };
     consumedOnPlayerHit: boolean;
     consumedOnWallHit: boolean;
     collideWithEachOther: boolean;
     spawn: {
       intervalStartSec: number; intervalMinSec: number; rampSec: number;
-      largeChance: number; offscreenMargin: number; aimJitterDegrees: number;
+      offscreenMargin: number; aimJitterDegrees: number;
       targetInset: number; maxAlive: number;
       /** Level-1 speed multiplier, and the compounding climb from there. Capped
        *  by speedMaxMul so sewage never outruns what a player can react to. */

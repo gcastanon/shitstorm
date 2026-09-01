@@ -1,9 +1,11 @@
 import {
-  BOSS_CLOG, OUTCOME_COUNTDOWN, OUTCOME_LOST, OUTCOME_PLAYING, OUTCOME_VICTORY,
+  BOSS_CLOG, LIFE_DEAD, LIFE_DOWNED,
+  OUTCOME_COUNTDOWN, OUTCOME_LOST, OUTCOME_PLAYING, OUTCOME_VICTORY,
   OUTCOME_WAITING, OUTCOME_WON,
 } from "../shared/types";
 import { formatScore } from "../shared/score";
-import { nextBossLevel } from "../shared/boss";
+import { bossKindFor, bossName, isBossLevel } from "../shared/boss";
+import { TIER_NAMES } from "../shared/asteroids";
 import type { NetClient, PlayerStats, RemoteSnapshotPlayer } from "./net";
 
 /**
@@ -30,7 +32,15 @@ export class DmPanel {
   private difficultyValue = document.getElementById("dm-difficulty-value")!;
   private difficultyWhat = document.getElementById("dm-difficulty-what")!;
   private skip = document.getElementById("dm-skip") as HTMLButtonElement;
+  private skipLevel = document.getElementById("dm-skip-level") as HTMLInputElement;
   private skipWhat = document.getElementById("dm-skip-what")!;
+  private roster = document.getElementById("dm-roster")!;
+  private rosterCount = document.getElementById("dm-roster-count")!;
+  /** What the roster was last built from; see `rendered` below for why. */
+  private rosterKey = "";
+  private restart = document.getElementById("dm-restart") as HTMLButtonElement;
+  private restartArmed = false;
+  private restartTimer = 0;
   /** True while the DM has hold of the slider, so synced state does not fight
    *  their drag. Same idea as not clobbering a text field someone is typing in. */
   private dragging = false;
@@ -66,7 +76,36 @@ export class DmPanel {
       this.difficulty.addEventListener(e, () => { this.dragging = false; });
     }
 
-    this.skip.addEventListener("click", () => this.net.room.send("dm:skipToBoss"));
+    this.skip.addEventListener("click", () => {
+      this.net.room.send("dm:skipToLevel", this.skipTarget());
+    });
+    // Enter in the box does the same thing, because typing a number and pressing
+    // return is what anyone will try first.
+    this.skipLevel.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") this.net.room.send("dm:skipToLevel", this.skipTarget());
+    });
+
+    // Two clicks. It throws away a run in progress with no undo, and it sits
+    // directly under two buttons that do not, so a stray click has to not be
+    // enough. The arming lapses on its own rather than staying hot.
+    this.restart.addEventListener("click", () => {
+      if (this.restartArmed) {
+        window.clearTimeout(this.restartTimer);
+        this.restartArmed = false;
+        this.restart.classList.remove("confirm");
+        this.restart.textContent = "Restart game";
+        this.net.room.send("dm:restart");
+        return;
+      }
+      this.restartArmed = true;
+      this.restart.classList.add("confirm");
+      this.restart.textContent = "Click again to throw the run away";
+      this.restartTimer = window.setTimeout(() => {
+        this.restartArmed = false;
+        this.restart.classList.remove("confirm");
+        this.restart.textContent = "Restart game";
+      }, 4000);
+    });
   }
 
   update() {
@@ -104,9 +143,14 @@ export class DmPanel {
     this.sub.textContent = this.footer(players, waiting);
 
     // Only actually startable once the level is over and the players are done
-    // choosing; before that the button would race the perk picks.
-    this.start.textContent = `Start level ${this.net.pendingLevel}`;
-    this.start.disabled = !waiting;
+    // choosing; before that the button would race the perk picks. An empty
+    // room is the other bar: the server refuses to start a level nobody is in,
+    // so the button says so rather than being pressed and doing nothing.
+    const empty = players.length === 0;
+    this.start.textContent = empty
+      ? "Waiting for a player to join"
+      : `Start level ${this.net.pendingLevel}`;
+    this.start.disabled = !waiting || empty;
   }
 
   /**
@@ -120,6 +164,8 @@ export class DmPanel {
   private updateLiveControls() {
     this.live.classList.add("show");
 
+    this.updateRoster();
+
     if (!this.dragging) {
       this.difficulty.value = String(this.net.bossDifficulty);
       this.difficultyValue.textContent = `${this.net.bossDifficulty.toFixed(2)}x`;
@@ -128,23 +174,154 @@ export class DmPanel {
     const b = this.net.boss;
     this.difficultyWhat.textContent = b
       ? (b.kind === BOSS_CLOG
-        ? `THE CLOG — scaling its speed. ${b.hp}/${b.maxHp}`
-        : `THE WELLSPRING — scaling its healing. ${b.hp}/${b.maxHp}`)
-      : "no boss this level · the Clog's speed · the Wellspring's healing";
+        ? `${bossName(b.kind)} — scaling its speed. ${b.hp}/${b.maxHp}`
+        : `${bossName(b.kind)} — scaling its healing. ${b.hp}/${b.maxHp}`)
+      : "no boss this level · the Clog's speed · the Gullet's healing";
 
-    // The target is worked out from the same shared table the server uses, so
-    // the label cannot promise a level the skip would not actually go to.
-    const target = nextBossLevel(this.net.tuning, this.net.level);
-    const armed = this.net.forcedNextLevel > 0;
-    this.skip.textContent = armed
-      ? `Skipping to level ${this.net.forcedNextLevel}`
-      : `Skip to next boss (level ${target})`;
-    this.skip.classList.toggle("armed", armed);
-    this.skipWhat.textContent = armed
-      ? "armed — takes effect when this level ends"
+    this.updateSkips();
+  }
+
+  /**
+   * The skip box: any level the DM types, not just a boss one.
+   *
+   * The caption names what is at the target when there is something worth
+   * knowing — a boss, or the level a new kind of sewage starts at — built from
+   * the same tables the game spawns from, so it cannot promise the wrong thing.
+   *
+   * The number box is deliberately never written to from here. It is a field the
+   * DM is typing in, and correcting it from synced state every frame would fight
+   * their keystrokes — the same reason the difficulty slider is left alone while
+   * it is being dragged.
+   */
+  private updateSkips() {
+    const armedAt = this.net.forcedNextLevel;
+    const typed = this.skipTarget();
+
+    this.skip.classList.toggle("armed", armedAt > 0);
+    this.skip.textContent = armedAt > 0 ? `Armed: ${armedAt}` : "Skip";
+
+    const at = armedAt > 0 ? armedAt : typed;
+    this.skipWhat.textContent = armedAt > 0
+      ? `armed for level ${armedAt}${this.whatIsAt(at)} — takes effect when this level ends`
       : (this.net.outcome === OUTCOME_WAITING
-        ? "starts that level instead of the queued one"
-        : "arms the jump; the current level still has to finish");
+        ? `starts level ${typed}${this.whatIsAt(at)} instead of the queued one`
+        : `arms the jump${this.whatIsAt(at)}; the current level still has to finish`);
+  }
+
+  /** The level in the box, clamped to what the server will accept. */
+  private skipTarget(): number {
+    const n = Math.floor(Number(this.skipLevel.value));
+    return Number.isFinite(n) ? Math.max(1, Math.min(999, n)) : 1;
+  }
+
+  /** " (THE CLOG)" or " (armoured sewage starts here)", or nothing. */
+  private whatIsAt(level: number): string {
+    const t = this.net.tuning;
+    if (isBossLevel(t, level)) return ` (${bossName(bossKindFor(t, level))})`;
+    // A tier's own fromLevel, so this cannot drift from what actually spawns.
+    // Skipping level 1, where large and small "start" and saying so is noise.
+    const starts = TIER_NAMES.filter((name) => {
+      const cfg = t.asteroids[name];
+      return cfg && cfg.fromLevel === level && cfg.fromLevel > 1;
+    });
+    return starts.length ? ` (${starts.join(" and ")} starts here)` : "";
+  }
+
+  /**
+   * Who is actually in the room, live.
+   *
+   * The summary table below only exists between levels, so during one the DM had
+   * no way to see who was connected, who was on the floor, or whether a seat had
+   * quietly emptied — and an empty seat is now the difference between a level
+   * that can start and one that cannot.
+   *
+   * Every field it reads is already synced for other reasons; nothing was added
+   * to the wire format for this, and nothing here is authoritative.
+   */
+  private updateRoster() {
+    const players = [...(this.net.snapshots.at(-1)?.players.values() ?? [])];
+    const seats = this.net.tuning.player.maxPlayers;
+    this.rosterCount.textContent = `${players.length}/${seats}`;
+
+    // Same memo as the table: update() runs every frame, and rebuilding DOM at
+    // 60fps is what made this page stop responding the first time.
+    const key = players
+      .map((p) => [p.id, p.health, p.maxHealth, p.lifeState, p.skulls, p.hasPicked,
+        p.carriedBy !== "", p.ultReady, p.pauseUsed].join(","))
+      .join("|") + `|${seats}|${this.net.outcome}`;
+    if (key === this.rosterKey) return;
+    this.rosterKey = key;
+
+    const rows = players.map((p) => this.rosterRow(p));
+    // Empty seats are drawn too, so "1/3" reads as a shape rather than only as a
+    // number the DM has to notice.
+    for (let i = players.length; i < seats; i++) rows.push(emptySeat());
+    this.roster.replaceChildren(...rows);
+  }
+
+  private rosterRow(p: RemoteSnapshotPlayer) {
+    const row = document.createElement("div");
+    row.className = "dm-p";
+
+    const dead = p.lifeState === LIFE_DEAD;
+    const down = p.lifeState === LIFE_DOWNED;
+    const frac = p.maxHealth > 0 ? Math.max(0, Math.min(1, p.health / p.maxHealth)) : 0;
+    if (dead) row.classList.add("dead");
+    else if (down) row.classList.add("downed");
+    else if (frac <= 0.25) row.classList.add("bad");
+    else if (frac <= 0.5) row.classList.add("hurt");
+
+    // The character's own colour, from tuning — the same one the cabinet and the
+    // sprite use, so a row is identifiable at a glance rather than by reading it.
+    const dot = document.createElement("span");
+    dot.className = "dot";
+    const colour = (this.net.tuning.characters as Record<string, { color?: string }>)[p.character]?.color;
+    if (colour && !dead) dot.style.background = colour;
+    row.appendChild(dot);
+
+    const who = document.createElement("span");
+    who.className = "who";
+    who.textContent = p.name;
+    const cls = document.createElement("i");
+    cls.textContent = `  ${p.character}`;
+    who.appendChild(cls);
+    row.appendChild(who);
+
+    const cond = document.createElement("span");
+    cond.className = "cond";
+    if (dead) {
+      cond.textContent = "dead";
+    } else if (down) {
+      // Skulls are what actually kills a downed player, so they are the number
+      // that matters here — not the health, which is zero by definition.
+      const total = this.net.tuning.downed.skullsToDie;
+      cond.textContent = `down ${"☠".repeat(p.skulls)}${"·".repeat(Math.max(0, total - p.skulls))}`;
+    } else if (p.carriedBy !== "") {
+      cond.textContent = "swallowed";
+    } else {
+      cond.textContent = `${Math.ceil(p.health)}/${p.maxHealth}`;
+    }
+    row.appendChild(cond);
+
+    // Between levels the useful thing is not health, it is who the room is
+    // still waiting on — the same question the start button is gated behind.
+    if (this.net.outcome === OUTCOME_WON && !p.hasPicked && !dead) {
+      const pick = document.createElement("span");
+      pick.className = "cond pick";
+      pick.textContent = "choosing…";
+      cond.textContent = "";
+      row.appendChild(pick);
+    }
+
+    if (!dead && !down) {
+      const bar = document.createElement("span");
+      bar.className = "hp";
+      const fill = document.createElement("span");
+      fill.style.width = `${frac * 100}%`;
+      bar.appendChild(fill);
+      row.appendChild(bar);
+    }
+    return row;
   }
 
   private headline() {
@@ -174,6 +351,10 @@ export class DmPanel {
         ? `  (+${formatScore(this.net.lastScore.total)} this level)`
         : "");
 
+    // An empty room outranks both. Passive mode does not start a level nobody
+    // is in, so saying "starting on its own" there would be a lie the DM would
+    // sit and wait on.
+    if (waiting && players.length === 0) return `${world}\nnobody is playing — waiting for a player to join`;
     if (waiting) return `${world}\n${this.net.dmPassive ? "passive — starting on its own" : "ready when you are"}`;
     if (pending.length > 0) return `${world}\nchoosing perks: ${pending.join(", ")}`;
     return world;
@@ -213,6 +394,22 @@ export class DmPanel {
     }
     return table;
   }
+}
+
+/** A seat nobody is sitting in. */
+function emptySeat() {
+  const row = document.createElement("div");
+  row.className = "dm-p empty";
+  const dot = document.createElement("span");
+  dot.className = "dot";
+  const who = document.createElement("span");
+  who.className = "who";
+  who.textContent = "—";
+  const cond = document.createElement("span");
+  cond.className = "cond";
+  cond.textContent = "open";
+  row.append(dot, who, cond);
+  return row;
 }
 
 function th(text: string) {

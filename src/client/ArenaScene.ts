@@ -9,13 +9,16 @@ import { bakeAll, GLYPH_W, hasGlyph, PIXEL, TEX, weaponStyle } from "./pixels";
 import { PerkScreen } from "./perkScreen";
 import { DmPanel } from "./dmPanel";
 import { applyPerks, meleeSweep, type PerkMods } from "../shared/perks";
-import type { AttackTuning } from "../shared/tuning";
+import type { AttackTuning, Tuning as TuningShape } from "../shared/tuning";
 import type { NetClient } from "./net";
 import { activeMods, fixedDtSec, secToTicks, specialCooldownSec, throneBubbleRadius } from "../shared/sim";
-import { cathedralRadiusMul, ultimateMods } from "../shared/ultimates";
+import { cathedralRadiusMul, devourReach, ultimateMods } from "../shared/ultimates";
 import { isStanding, townBox } from "../shared/structures";
 import { formatScore } from "../shared/score";
-import { TIER_LARGE, tierRadius, type Tier } from "../shared/asteroids";
+import { bossName, isBossLevel } from "../shared/boss";
+import {
+  TIER_BOLUS, TIER_CRUST, TIER_LARGE, tierHits, tierRadius, type Tier,
+} from "../shared/asteroids";
 import {
   BOSS_CLOG, BTN, LIFE_ALIVE, LIFE_DEAD, LIFE_DOWNED,
   OUTCOME_COUNTDOWN, OUTCOME_PLAYING, OUTCOME_VICTORY, OUTCOME_WAITING, OUTCOME_WON,
@@ -30,6 +33,31 @@ const RANGED_RECOIL_SEC = 0.12;
  *  render constants. */
 const TIMER_BAR_H = 6;
 const TIMER_BAR_INSET = 4;
+
+/** How long the Gullet flares after swallowing a chunk. Long enough to catch out
+ *  of the corner of your eye while dodging, short enough that a steady drip of
+ *  tribute still reads as separate swallows rather than one continuous glow. */
+const BOSS_FED_MS = 260;
+
+/**
+ * How long after drawing your own ultimate to ignore the snapshot reporting it.
+ *
+ * Comfortably longer than a round trip and far shorter than the three seconds an
+ * Echo waits, so the duplicate is dropped and the echo is not.
+ */
+const LOCAL_ULT_DEDUPE_MS = 900;
+
+/**
+ * The Druid's jaw sprite length in world pixels at scale 1 — 16 art pixels at
+ * PIXEL. Devour scales by `(reach - hinge) / this` so the teeth land exactly on
+ * the radius the server eats at, with the hinge left where it always is.
+ */
+const MAW_JAW_PX = 16 * PIXEL;
+/** Revolutions a second while Devour runs. Fast enough that the sweep reads as
+ *  a filled circle, slow enough not to alias into looking backwards. */
+const DEVOUR_SPIN_REV_SEC = 3.5;
+/** Bites per revolution, so it visibly chews rather than gaping. */
+const DEVOUR_CHEWS_PER_REV = 4;
 
 /** A bite runs longer than the Druid's 0.12s activeSec purely so it is legible —
  *  a jaw that opens and shuts inside four frames just flickers. It is a ceiling
@@ -78,6 +106,23 @@ function swingSeconds(styleSec: number, cooldownSec: number, m: PerkMods): numbe
 function reachScale(atk: AttackTuning | undefined, m: PerkMods): number {
   if (!atk || atk.kind !== "melee" || atk.reach <= 0) return 1;
   return meleeSweep(atk, m).reach / atk.reach;
+}
+
+/**
+ * The sprite a chunk wears: its tier, and for the armoured one whether it has
+ * already been hit.
+ *
+ * The cracked variant is the answer to "why didn't that die?" — without it a
+ * crust that has taken one hit is indistinguishable from a fresh one, and the
+ * only feedback for the whole mechanic would be that your attack appeared to do
+ * nothing.
+ */
+function chunkTexture(t: TuningShape, tier: Tier, hits: number): string {
+  if (tier === TIER_BOLUS) return TEX.sewageBolus;
+  if (tier === TIER_CRUST) {
+    return hits < tierHits(t, tier) ? TEX.sewageCrustHit : TEX.sewageCrust;
+  }
+  return tier === TIER_LARGE ? TEX.sewageLarge : TEX.sewageSmall;
 }
 
 /** Stable pseudo-angle from an entity id, so per-chunk decoration does not
@@ -176,6 +221,8 @@ export class ArenaScene extends Phaser.Scene {
   private showServerGhost = false;
   private showHitboxes = false;
   private extrapolate = true;
+  /** The diagnostic half of the HUD strip, off by default. F3. */
+  private showDebug = false;
 
   private bodies!: SpritePool;
   private weapons!: SpritePool;
@@ -190,6 +237,14 @@ export class ArenaScene extends Phaser.Scene {
   private downedText!: Phaser.GameObjects.Text;
   /** The boss's name and health, on its bar. Hidden on ordinary levels. */
   private bossText!: Phaser.GameObjects.Text;
+  /** Last seen boss health, and when it last went up — the Gullet swallowing
+   *  something. -1 means "no boss yet", so the first snapshot cannot read as a
+   *  feed. Diffed from snapshots like every other effect. */
+  private bossHp = -1;
+  private bossFedAt = -1e9;
+  /** When this client last drew its own ultimate from the predictor, so the
+   *  snapshot that follows does not draw it a second time. */
+  private lastLocalUlt = -1e9;
   /** The victory word, one pooled sprite per letter. */
   private victory!: SpritePool;
   private victoryText!: Phaser.GameObjects.Text;
@@ -244,8 +299,10 @@ export class ArenaScene extends Phaser.Scene {
       wall: { w: t.structures.wall.width, h: t.structures.wall.height },
       sewageLarge: t.asteroids.large.radius * 2,
       sewageSmall: t.asteroids.small.radius * 2,
+      sewageCrust: t.asteroids.crust.radius * 2,
+      sewageBolus: t.asteroids.bolus.radius * 2,
       bossClog: t.boss.clog.radius * 2,
-      bossWellspring: t.boss.wellspring.radius * 2,
+      bossGullet: t.boss.gullet.radius * 2,
     });
 
     // Two grounds, because the ring has to read as a different place. The
@@ -287,6 +344,7 @@ export class ArenaScene extends Phaser.Scene {
     this.input.keyboard?.on("keydown", () => this.sfx.unlock());
     this.input.on("pointerdown", () => this.sfx.unlock());
     this.input.keyboard?.on("keydown-M", () => this.sfx.toggleMute());
+    this.input.keyboard?.on("keydown-F3", () => { this.showDebug = !this.showDebug; });
 
     // Pause. A room message rather than a button bit: the bitmask travels in the
     // command queue, which is exactly what a pause stops the server consuming,
@@ -392,9 +450,11 @@ export class ArenaScene extends Phaser.Scene {
     this.dmPanel.update();
 
     // Layers follow the wave, and the whole thing stops once the level is
-    // decided so the outcome stingers have the room to themselves.
+    // decided so the outcome stingers have the room to themselves. Muted counts
+    // as "should not play", or this would restart the scheduler on the very next
+    // frame after toggleMute stopped it.
     this.sfx.music?.update(
-      this.net.outcome === OUTCOME_PLAYING,
+      !this.sfx.muted && this.net.outcome === OUTCOME_PLAYING,
       this.net.waveSpawning,
       this.net.waveIndex,
     );
@@ -483,6 +543,15 @@ export class ArenaScene extends Phaser.Scene {
           if (canPlay("special")) this.playSpecialSound(e.special);
           break;
 
+        case "ultimate":
+          // Your own first cast was already drawn from the predictor on the
+          // frame you pressed it, so the snapshot that reports it arrives as a
+          // duplicate. An Echo or Rally comes seconds later and is not one.
+          if (e.id === this.net.sessionId
+            && performance.now() - this.lastLocalUlt < LOCAL_ULT_DEDUPE_MS) break;
+          this.castUltimate(e.x, e.y, e.id);
+          break;
+
         case "waveStart":
           this.sfx.waveStart();
           break;
@@ -499,6 +568,31 @@ export class ArenaScene extends Phaser.Scene {
     }
   }
 
+  /**
+   * An ultimate going off, for anybody.
+   *
+   * Every one of the nine gets this, including the four whose world effect is
+   * already obvious — a cast you can see coming from across the arena is worth
+   * having whether or not you can also see what it did.
+   */
+  private castUltimate(x: number, y: number, id: string) {
+    const snap = this.net.snapshots[this.net.snapshots.length - 1];
+    const character = snap?.players.get(id)?.character ?? "";
+    const colour = this.characterColor(character);
+
+    this.fx.burst(x, y, colour, 30);
+    this.fx.burst(x, y, FX_SPARK, 14);
+    this.fx.shake(120, 0.009);
+    this.sfx.ultimate();
+  }
+
+  /** A character's tuning colour as a Phaser int. */
+  private characterColor(character: string) {
+    return Phaser.Display.Color.HexStringToColor(
+      this.net.tuning.characters[character]?.color ?? "#94a3b8",
+    ).color;
+  }
+
   private playSpecialSound(kind: string) {
     if (kind === "throne") this.sfx.throne();
     else if (kind === "grapple") this.sfx.grapple();
@@ -510,6 +604,10 @@ export class ArenaScene extends Phaser.Scene {
    * revive has to fit inside and the player needs to be able to judge it.
    */
   private waveLabel() {
+    // Boss levels have no waves at all any more, so a wave counter there would
+    // be a number counting nothing. The boss's own bar is what to read instead.
+    if (isBossLevel(this.net.tuning, this.net.level)) return "BOSS";
+
     const total = this.net.tuning.waves.countPerLevel;
     const shown = Math.min(this.net.waveIndex + 1, total);
     if (this.net.waveSpawning) return `wave ${shown}/${total}`;
@@ -748,6 +846,14 @@ export class ArenaScene extends Phaser.Scene {
       this.fx.trail(me.x, me.y, FX_SPARK, 6);
     }
     if (fired.specialFired) this.playSpecialSound(character?.special.kind ?? "");
+    if (fired.ultimateFired) {
+      // From the predictor, so your own ultimate lands on the frame you press it
+      // rather than a round trip later — the same split attack, dash and special
+      // already use. The timestamp is what stops the snapshot reporting the same
+      // cast a moment later and firing it twice.
+      this.lastLocalUlt = performance.now();
+      this.castUltimate(me.x, me.y, this.net.sessionId);
+    }
 
     this.net.sendInput(cmd);
   }
@@ -808,9 +914,7 @@ export class ArenaScene extends Phaser.Scene {
           ? { ...raw, x: this.predictor.state.x, y: this.predictor.state.y, aim: raw.aim }
           : (this.interpEnabled ? (sampleRemote(this.net.snapshots, id, renderTime) ?? raw) : raw);
 
-        const color = Phaser.Display.Color.HexStringToColor(
-          t.characters[view.character]?.color ?? "#94a3b8",
-        ).color;
+        const color = this.characterColor(view.character);
 
         // Everything below that a perk can change — reach, arc, throne radius,
         // skull count — is drawn from these rather than from raw tuning.
@@ -886,10 +990,33 @@ export class ArenaScene extends Phaser.Scene {
           g.strokeCircle(view.x, view.y, t.downed.reviveRadius);
         }
 
-        // A Druid with someone inside reads as visibly fuller.
+        const ultOn = (isSelf ? this.predictor.state.ultTicks : view.ultTicks) > 0;
+
+        // A Druid with someone inside reads as visibly fuller. Grove holds the
+        // whole team and makes all of them untouchable, which is a different
+        // promise from eating one ally — so it gets a wider, brighter ring that
+        // pulses for its duration rather than the same thin one.
         if (view.swallowedCount > 0) {
-          g.lineStyle(3, color, 0.8);
-          g.strokeCircle(view.x, view.y, r + 9);
+          const grove = ultOn && view.ultimateId === "grove";
+          if (grove) {
+            const pulse = 0.55 + 0.45 * Math.sin(performance.now() / 110);
+            g.lineStyle(5, 0xbbf7d0, 0.85);
+            g.strokeCircle(view.x, view.y, r + 16 + pulse * 5);
+            g.lineStyle(2, color, 0.9);
+            g.strokeCircle(view.x, view.y, r + 9);
+          } else {
+            g.lineStyle(3, color, 0.8);
+            g.strokeCircle(view.x, view.y, r + 9);
+          }
+        }
+
+        // The two ultimates whose effect is entirely out in the world get an
+        // aura, so it is attached to whoever paid for it and you can see it end.
+        if (ultOn && (view.ultimateId === "slow-storm" || view.ultimateId === "windrunner")) {
+          const tint = view.ultimateId === "slow-storm" ? 0x67e8f9 : 0xfde68a;
+          const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 130);
+          g.lineStyle(2, tint, 0.35 + pulse * 0.4);
+          g.strokeCircle(view.x, view.y, r + 12 + pulse * 4);
         }
 
         if (down) {
@@ -901,7 +1028,21 @@ export class ArenaScene extends Phaser.Scene {
         // The dead have dropped their weapon.
         if (!dead) {
           const aimAngle = isSelf ? this.aimAngle() : view.aim;
-          this.placeWeapon(id, view.character, view.x, view.y, aimAngle, down ? 0.5 : bodyAlpha, mods);
+          // Devour's radius, from the same function the server eats with, so the
+          // maw cannot be drawn anywhere but where the mouthful actually lands.
+          const atk = t.characters[view.character]?.attack;
+          const devour = ultOn && view.ultimateId === "devour" && atk
+            ? devourReach(atk, t.player.radius, view.ultimateUpgrades)
+            : 0;
+          if (devour > 0 && this.showHitboxes) {
+            // H is the contract that shows the truth, and Devour had none to show.
+            g.lineStyle(2, 0xf59e0b, 0.9);
+            g.strokeCircle(view.x, view.y, devour);
+          }
+          this.placeWeapon(
+            id, view.character, view.x, view.y, aimAngle,
+            down ? 0.5 : bodyAlpha, mods, devour,
+          );
 
           // An aim line, not a reach indicator: the melee arc that used to be
           // drawn here is gone, and the weapon's own size is what shows reach now.
@@ -978,6 +1119,7 @@ export class ArenaScene extends Phaser.Scene {
   private placeWeapon(
     id: string, character: string,
     x: number, y: number, aim: number, alpha: number, m: PerkMods,
+    devour = 0,
   ) {
     const atk = this.net.tuning.characters[character]?.attack;
     const style = weaponStyle(character, atk?.kind ?? "melee");
@@ -999,7 +1141,7 @@ export class ArenaScene extends Phaser.Scene {
     }
 
     if (style === "bite") {
-      this.placeMaw(id, character, x, y, aim, alpha, p, m);
+      this.placeMaw(id, character, x, y, aim, alpha, p, m, devour);
       return;
     }
 
@@ -1045,10 +1187,21 @@ export class ArenaScene extends Phaser.Scene {
   private placeMaw(
     id: string, character: string,
     x: number, y: number, aim: number, alpha: number, p: number, m: PerkMods,
+    devour = 0,
   ) {
     const r = this.net.tuning.player.radius;
     const atk = this.net.tuning.characters[character]?.attack;
     const REST = 0.20;
+
+    // Devour: the maw opens wide and whirls. It eats in a full circle, not a
+    // cone, so a big mouth pointing along aim would promise the wrong shape —
+    // spinning it fast enough to blur round is what makes the covered area
+    // honest. `devour` is the radius the server actually eats at, composed by
+    // the shared devourReach, so the jaw tips land exactly on it.
+    if (devour > 0) {
+      this.placeDevourMaw(id, character, x, y, alpha, devour, r);
+      return;
+    }
 
     // Gape widens the bite, so the jaws open wider by the same proportion the
     // arc grew. A mouth that hits 40 degrees more should look like it.
@@ -1079,6 +1232,50 @@ export class ArenaScene extends Phaser.Scene {
       jaw.setRotation(aim + dir * gape * 0.5);
       // Gape widens the jaws' angle above; Reach makes the whole maw bigger.
       jaw.setScale(PIXEL * reachScale(atk, m));
+      jaw.setAlpha(alpha);
+    }
+  }
+
+  /**
+   * Devour's maw: grown to the eating radius and spun fast enough to read as
+   * covering the whole circle.
+   *
+   * The spin is the whole trick. Devour swallows everything within `reach` in
+   * every direction, and a mouth big enough to show that would look like a cone
+   * aimed wherever the Druid happens to be facing. Whirling it means the swept
+   * area *is* the eaten area, with nothing extra drawn.
+   *
+   * The jaw sprite is 16 art pixels long on a hinge, so its tip normally sits
+   * MAW_TIP_PX out; scaling by `reach / MAW_TIP_PX` puts the teeth on the edge
+   * the server is actually eating at.
+   */
+  private placeDevourMaw(
+    id: string, character: string,
+    x: number, y: number, alpha: number, reach: number, r: number,
+  ) {
+    // The hinge stays at the player's edge and only the jaws grow. Scaling the
+    // hinge too detaches the mouth and flings it out to the rim, where it reads
+    // as a slab orbiting the Druid rather than as a mouth opening from them —
+    // which is exactly what the first version did.
+    const hinge = r + 5;
+    const scale = Math.max(1, (reach - hinge) / MAW_JAW_PX);
+    const spin = (performance.now() / 1000) * DEVOUR_SPIN_REV_SEC * Math.PI * 2;
+    // Chomping off the spin phase rather than a swing: several bites per
+    // revolution, so it is visibly working rather than held open.
+    const chew = (Math.sin(spin * DEVOUR_CHEWS_PER_REV) + 1) / 2;
+    const gape = 0.35 + chew * 0.55;
+
+    const hx = x + Math.cos(spin) * hinge;
+    const hy = y + Math.sin(spin) * hinge;
+    const tex = TEX.weapon(character);
+
+    for (const [key, flip, dir] of [[id, false, -1], [`${id}-jaw`, true, 1]] as const) {
+      const jaw = this.weapons.get(key, tex);
+      jaw.setPosition(hx, hy);
+      jaw.setOrigin(0.05, flip ? 0 : 1);
+      jaw.setFlipY(flip);
+      jaw.setRotation(spin + dir * gape * 0.5);
+      jaw.setScale(PIXEL * scale);
       jaw.setAlpha(alpha);
     }
   }
@@ -1160,6 +1357,23 @@ export class ArenaScene extends Phaser.Scene {
       const g2 = Math.round(0x66 + 0x99 * frac);
       sprite.setTint((0xff << 16) | (g2 << 8) | g2);
 
+      // Consecrate's two states. Warded cover cannot be destroyed at all, which
+      // is worth being able to see — it used to look exactly like cover about to
+      // fall. Spires additionally turns sewage away like a throne, which is why
+      // `coverReflects` has been synced since it was built, with a comment
+      // promising this drawing; nothing read it until now.
+      if (this.net.coverWarded || this.net.coverReflects) {
+        const pulse = 0.5 + 0.5 * Math.sin(performance.now() / 400);
+        if (this.net.coverReflects) {
+          sprite.setTint(0xbfdbfe);
+          g.lineStyle(2, 0x93c5fd, 0.45 + pulse * 0.3);
+        } else {
+          sprite.setTint(0xfde68a);
+          g.lineStyle(2, 0xfbbf24, 0.35 + pulse * 0.25);
+        }
+        g.strokeRect(left - 2, top - 2, b.w + 4, b.h + 4);
+      }
+
       if (this.showHitboxes) {
         g.lineStyle(1, 0x38bdf8, 0.9);
         g.strokeRect(left, top, b.w, b.h);
@@ -1197,15 +1411,22 @@ export class ArenaScene extends Phaser.Scene {
    * disagreed with its hitbox would be most obvious and most unfair.
    *
    * Not extrapolated. Sewage is led by snapshot age because it moves fast enough
-   * for the lag to show; the Clog crawls and the Wellspring does not move at all,
-   * so there is nothing to hide and leading it would only add error.
+   * for the lag to show; the Clog crawls and the Gullet does not move at all, so
+   * there is nothing to hide and leading it would only add error.
    */
   private drawBoss() {
     const b = this.net.boss;
     if (!b || b.hp <= 0) {
       this.bossText.setVisible(false);
+      this.bossHp = -1;
       return;
     }
+
+    // Health going *up* is the Gullet swallowing something, which is the one
+    // thing in this fight the players most need to notice. Derived by diffing
+    // snapshots like every other effect rather than by a new message.
+    if (this.bossHp >= 0 && b.hp > this.bossHp) this.bossFedAt = performance.now();
+    this.bossHp = b.hp;
 
     const t = this.net.tuning;
     const g = this.g;
@@ -1213,9 +1434,21 @@ export class ArenaScene extends Phaser.Scene {
     const sprite = this.props.get("boss", TEX.boss(b.kind));
     sprite.setPosition(b.x, b.y);
     sprite.setScale(PIXEL);
-    // The Clog turns as it comes; the Wellspring sits still, so a rotation would
+    // The Clog turns as it comes; the Gullet sits still, so a rotation would
     // just make it wobble.
     sprite.setRotation(b.kind === BOSS_CLOG ? idAngle(`${Math.round(b.x / 40)}`) : 0);
+
+    // It flares as it swallows, and settles back. Without this the only sign is
+    // a health bar creeping the wrong way, which is not something you can watch
+    // while dodging a spiral.
+    const fed = (performance.now() - this.bossFedAt) / BOSS_FED_MS;
+    if (fed >= 0 && fed < 1) {
+      g.lineStyle(4, 0xbef264, 0.85 * (1 - fed));
+      g.strokeCircle(b.x, b.y, b.radius + 6 + 22 * fed);
+      sprite.setTint(0xd9f99d);
+    } else {
+      sprite.clearTint();
+    }
 
     if (this.showHitboxes) {
       g.lineStyle(2, 0xf59e0b, 0.9);
@@ -1245,7 +1478,7 @@ export class ArenaScene extends Phaser.Scene {
 
     this.bossText.setPosition(t.arena.width / 2, y + h / 2);
     this.bossText.setText(
-      `${b.kind === BOSS_CLOG ? "THE CLOG" : "THE WELLSPRING"}   ${b.hp} / ${b.maxHp}`
+      `${bossName(b.kind)}   ${b.hp} / ${b.maxHp}`
       + (b.phase > 0 ? "   ENRAGED" : ""),
     );
     this.bossText.setVisible(true);
@@ -1266,7 +1499,7 @@ export class ArenaScene extends Phaser.Scene {
       // bodies: a rotated disc covers exactly the same pixels, so spinning each
       // chunk by a hash of its id gives them individuality with no cost to
       // honesty.
-      const sprite = this.chunks.get(a.id, a.tier === TIER_LARGE ? TEX.sewageLarge : TEX.sewageSmall);
+      const sprite = this.chunks.get(a.id, chunkTexture(t, a.tier as Tier, a.hits));
       sprite.setPosition(x, y);
       sprite.setScale(PIXEL);
       sprite.setRotation(idAngle(a.id));
@@ -1626,32 +1859,50 @@ export class ArenaScene extends Phaser.Scene {
     text.setPosition(x, y);
   }
 
+  /**
+   * The strip above the arena.
+   *
+   * Only what a player is actually playing with. Everything diagnostic — frame
+   * rate, round-trip, tick, prediction error, and the list of debug toggles —
+   * sits behind F3, because it was a wall of numbers permanently in the way of
+   * the handful that matter, and reading `err 0.00px` is not a thing anybody
+   * does mid-dodge. The toggles all still work whether or not their states are
+   * listed; F3 is what tells you they exist.
+   */
   private drawHud() {
-    const p = this.predictor;
-    this.hud.textContent = [
-      `fps ${Math.round(this.game.loop.actualFps)}`,
-      `rtt ${Math.round(this.net.rttMs)}ms`,
-      `players ${this.net.snapshots.at(-1)?.players.size ?? 0}/${this.net.tuning.player.maxPlayers}`,
-      `tick ${this.net.snapshots.at(-1)?.tick ?? 0}`,
-      `pending ${p.pending.length}`,
-      `err ${p.lastError.toFixed(2)}px`,
+    const parts = [
       `level ${this.net.level}`,
       `score ${formatScore(this.net.score)}`,
-      `pause ${this.currentServerSelf()?.pauseUsed ? "spent" : "ready (ESC)"}`,
-      // Shared, so this is the party's number and not yours.
-      `lives ${"●".repeat(this.net.lives)}${"○".repeat(Math.max(0, this.net.tuning.level.extraLives - this.net.lives))}`,
-      `predict ${p.enabled ? "on" : "off"} (P)`,
-      `interp ${this.interpEnabled ? "on" : "off"} (I)`,
-      `ghost ${this.showServerGhost ? "on" : "off"} (G)`,
-      `boxes ${this.showHitboxes ? "on" : "off"} (H)`,
-      `lead ${this.extrapolate ? "on" : "off"} (X)`,
-      `sound ${this.sfx.muted ? "off" : "on"} (M)`,
-      `sewage ${this.net.asteroids.length}`,
-      `arrows ${this.net.projectiles.length}`,
       `time ${this.levelSecondsLeft()}s`,
       this.waveLabel(),
       `hp ${this.currentServerSelf()?.health ?? "-"}`,
-      `structures ${this.net.structures.filter(isStanding).length}/${this.net.structures.length}`,
-    ].join("   ");
+      // Shared, so this is the party's number and not yours.
+      `lives ${"●".repeat(this.net.lives)}${"○".repeat(Math.max(0, this.net.tuning.level.extraLives - this.net.lives))}`,
+      `pause ${this.currentServerSelf()?.pauseUsed ? "spent" : "ready (ESC)"}`,
+      `town ${this.net.structures.filter(isStanding).length}/${this.net.structures.length}`,
+    ];
+
+    if (this.showDebug) {
+      const p = this.predictor;
+      parts.push(
+        "—",
+        `fps ${Math.round(this.game.loop.actualFps)}`,
+        `rtt ${Math.round(this.net.rttMs)}ms`,
+        `players ${this.net.snapshots.at(-1)?.players.size ?? 0}/${this.net.tuning.player.maxPlayers}`,
+        `tick ${this.net.snapshots.at(-1)?.tick ?? 0}`,
+        `pending ${p.pending.length}`,
+        `err ${p.lastError.toFixed(2)}px`,
+        `sewage ${this.net.asteroids.length}`,
+        `arrows ${this.net.projectiles.length}`,
+        `predict ${p.enabled ? "on" : "off"} (P)`,
+        `interp ${this.interpEnabled ? "on" : "off"} (I)`,
+        `ghost ${this.showServerGhost ? "on" : "off"} (G)`,
+        `boxes ${this.showHitboxes ? "on" : "off"} (H)`,
+        `lead ${this.extrapolate ? "on" : "off"} (X)`,
+        `sound ${this.sfx.muted ? "off" : "on"} (M)`,
+      );
+    }
+
+    this.hud.textContent = parts.join("   ");
   }
 }

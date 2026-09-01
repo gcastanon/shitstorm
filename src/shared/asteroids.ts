@@ -2,18 +2,82 @@ import { clamp } from "./math";
 import { isStanding, type StructureBox } from "./structures";
 import type { Tuning } from "./tuning";
 
-/** Wire-cheap tier codes. Radius, speed, and damage all come from tuning. */
+/**
+ * Wire-cheap tier codes. Radius, speed, damage, toughness and what a chunk
+ * breaks into all come from tuning, looked up by name.
+ *
+ * A table rather than the pair of constants and the ternary this used to be.
+ * Every tier-shaped decision — what it breaks into, how many hits it takes, when
+ * it starts appearing, which sprite it wears — now lives beside the numbers in
+ * `tuning.json` instead of being a second ternary somewhere else.
+ *
+ * **Order is load-bearing.** `pickTier` walks this array, so putting `large`
+ * first with the two original weights summing to 1 makes the level 1-4 draw
+ * bit-identical to the `rng() < largeChance` it replaced. Reordering it would
+ * silently reshuffle every seeded run.
+ */
 export const TIER_LARGE = 0;
 export const TIER_SMALL = 1;
-export type Tier = 0 | 1;
+/** Armoured: two hits, then it breaks into Smalls. From level 5. */
+export const TIER_CRUST = 2;
+/** Breaks into two Large rather than two Small. From level 15. */
+export const TIER_BOLUS = 3;
+export type Tier = 0 | 1 | 2 | 3;
 
-export const tierName = (tier: Tier) => (tier === TIER_LARGE ? "large" : "small");
+export const TIER_NAMES = ["large", "small", "crust", "bolus"] as const;
+export type TierName = (typeof TIER_NAMES)[number];
+export const TIERS: Tier[] = [TIER_LARGE, TIER_SMALL, TIER_CRUST, TIER_BOLUS];
+
+export const tierName = (tier: Tier): TierName => TIER_NAMES[tier] ?? "small";
 export const tierCfg = (t: Tuning, tier: Tier) => t.asteroids[tierName(tier)];
 export const tierRadius = (t: Tuning, tier: Tier) => tierCfg(t, tier).radius as number;
+/** Hits this tier survives. One for everything except the armoured type. */
+export const tierHits = (t: Tuning, tier: Tier) => Math.max(1, tierCfg(t, tier).hits);
+
+/** The tier a name refers to, or null. */
+export function tierByName(name: string): Tier | null {
+  const i = TIER_NAMES.indexOf(name as TierName);
+  return i < 0 ? null : (i as Tier);
+}
+
+/** What this tier breaks into when its last hit lands, or null for nothing. */
+export function tierSplitsInto(t: Tuning, tier: Tier): Tier | null {
+  const into = tierCfg(t, tier).splitsInto;
+  return into ? tierByName(into) : null;
+}
+
+/**
+ * Which tier the next chunk is, weighted, among those the level has unlocked.
+ *
+ * Consumes exactly one value from `rng`, and at levels below the first
+ * `fromLevel` the weights are the original two summing to 1 — so a seeded run
+ * before level 5 draws precisely what it drew before this existed.
+ */
+export function pickTier(t: Tuning, level: number, rng: () => number): Tier {
+  let total = 0;
+  for (const tier of TIERS) {
+    const cfg = tierCfg(t, tier);
+    if (level >= cfg.fromLevel) total += cfg.weight;
+  }
+  if (total <= 0) return TIER_SMALL;
+
+  let r = rng() * total;
+  for (const tier of TIERS) {
+    const cfg = tierCfg(t, tier);
+    if (level < cfg.fromLevel) continue;
+    r -= cfg.weight;
+    if (r < 0) return tier;
+  }
+  return TIER_SMALL;
+}
 
 export interface AsteroidSim {
   id: string;
   tier: Tier;
+  /** Hits left before it breaks. Part of the sim shape rather than bolted on by
+   *  the server, so split children carry their own toughness out of
+   *  `splitAsteroid` and the client can draw a cracked one. */
+  hits: number;
   x: number;
   y: number;
   vx: number;
@@ -58,11 +122,14 @@ export function firstStructureHit(
 }
 
 /**
- * Split a chunk that has been struck by an attack.
+ * Split a chunk whose last hit has landed.
  *
- * Large yields two Small; Small yields nothing and is destroyed. Children are
- * sped up slightly, so clearing a wave makes the field faster and messier rather
- * than simply smaller.
+ * What it yields comes from the tier's own `splitsInto`: Large and the armoured
+ * crust yield two Small, the bolus yields two **Large** — which then split
+ * again, so one bolus is seven hits and four fragments — and Small yields
+ * nothing. Children are sped up slightly, so clearing a wave makes the field
+ * faster and messier rather than simply smaller; through a bolus that compounds
+ * twice, and its final fragments fly at 1.32x what it did.
  *
  * `awayAngle` is the direction pointing from the attacker toward the chunk, and
  * the fan is measured off it. That is what stops a swing spraying the fragments
@@ -74,7 +141,8 @@ export function firstStructureHit(
  * Omitting it falls back to fanning off the chunk's own heading, which is the
  * behaviour anything that does not know who struck the chunk still gets.
  *
- * Returns [] for a Small, which is the caller's signal that it just died.
+ * Returns [] for a tier that breaks into nothing, which is the caller's signal
+ * that it just died.
  */
 export function splitAsteroid(
   a: AsteroidSim,
@@ -82,7 +150,8 @@ export function splitAsteroid(
   makeId: () => string,
   awayAngle?: number,
 ): AsteroidSim[] {
-  if (a.tier === TIER_SMALL) return [];
+  const into = tierSplitsInto(t, a.tier);
+  if (into === null) return [];
 
   const cfg = t.asteroids.split;
   const speed = Math.hypot(a.vx, a.vy) * cfg.speedMultiplier;
@@ -97,7 +166,8 @@ export function splitAsteroid(
     const ang = axis + frac * spread;
     out.push({
       id: makeId(),
-      tier: TIER_SMALL,
+      tier: into,
+      hits: tierHits(t, into),
       x: a.x,
       y: a.y,
       vx: Math.cos(ang) * speed,

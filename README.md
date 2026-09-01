@@ -13,11 +13,15 @@ npm install
 npm run dev
 ```
 
-Then open **`http://localhost:5173`** in three tabs, pick a character in each. A fourth tab can **Join as Dungeon Master** — a role that does not play: they watch the whole arena, decide when each level begins, and get a summary of it afterwards. With a DM connected nothing starts until they say so; with none, levels start on their own. A DM who only wants to watch can tick **Passive DM**, which leaves their screen exactly as it was but stops levels waiting on them.
+Then open **`http://localhost:5173`** in three tabs, pick a character in each. **One of each** — a fighter somebody has already taken is greyed out on the entry screen with their name under it, and the server refuses it even if you get there first. The same goes for the Dungeon Master's chair: one per room. A fourth tab can **Join as Dungeon Master** — a role that does not play: they watch the whole arena, decide when each level begins, and get a summary of it afterwards. With a DM connected nothing starts until they say so; with none, levels start on their own. A DM who only wants to watch can tick **Passive DM**, which leaves their screen exactly as it was but stops levels waiting on them.
+
+The DM's panel carries a **live roster** of who is in the room — name, class, health, and whether each player is up, down (with their skull count), swallowed, or dead — plus a dimmed row for every empty seat. It stays on screen during a level, which is when the summary table is not.
+
+**A level never runs without at least one player.** A Dungeon Master on their own cannot start one — their Start button says so — and if the last player leaves mid-level the run ends and the room goes back to the start screen. The DM is not a player, and a level with nobody in it could not be won or lost.
 
 Every level opens with a three-second countdown over the rebuilt town, so you can see where you are before the first wave.
 
-**Levels 10 and 20 are boss fights.** At 10 you meet **the Clog** — an enormous mass grinding in from the edge, shedding sewage the whole way. If it reaches the town it starts pulling buildings down one at a time, grinding from one to the next until nothing is left. At 20, **the Wellspring** erupts in the town square and pumps; it heals every time a building falls, so the fight is a race between hurting it and holding the town. Both are won by killing them and lost if the timer runs out first, and both scale their health to the size of the party, so a boss is a real fight for three without being a wall for one. **Kill the Wellspring and the run is over — you have won it**, and the game says so. The Dungeon Master has a **difficulty slider they can drag mid-fight** — it scales the Clog's speed and the Wellspring's healing — and a **Skip to next boss** button that sends the run straight to level 10 or 20, for testing them without playing nine levels first.
+**Levels 10 and 20 are boss fights.** At 10 you meet **the Clog** — an enormous mass grinding in from the edge, shedding sewage the whole way. If it reaches the town it starts pulling buildings down one at a time, grinding from one to the next until nothing is left. **Hitting it knocks chunks loose**, so the storm around the fight is one you are making: stand off it and the arena stays clear while the town comes down, lay into it and you buy the damage with sewage. At 20, **the Gullet** opens in the town square: a slavering mouth that *summons* sewage to itself in dense patterns — spirals, spokes, walls closing in from every side — and heals off every chunk that reaches it. For nineteen levels sewage is a thing you dodge; here it is a thing you have to go out and break before it lands. Your own town is on your side for once, because a wall eats a chunk before the Gullet can — but the town will not last the fight. **Neither boss level has ordinary waves**: the boss is the only thing sending sewage at you. Both are won by killing them and lost if the timer runs out first, and both scale their health to the size of the party, so a boss is a real fight for three without being a wall for one. **Kill the Gullet and the run is over — you have won it**, and the game says so. The Dungeon Master has a **difficulty slider they can drag mid-fight** — it scales the Clog's speed and the Gullet's healing — and a **skip to level** box: type any level and the run jumps there, for reaching whatever you want to look at without playing up to it. The caption says what is waiting — a boss, or the level a new kind of sewage starts at. Beside those sits **Restart game**, which throws the run away and opens level 1 immediately — it takes two clicks, because it cannot be undone.
 
 | Control | Does |
 | --- | --- |
@@ -27,6 +31,8 @@ Every level opens with a three-second countdown over the rebuilt town, so you ca
 | `Shift` | Ultimate — one enormous ability, once per level, unlocked at level 5 |
 | `Esc` | Pause, for everyone. One each per level, and only the player who called it can resume |
 | Right mouse or `E` | **While down or dead:** spend one of the party's three shared extra lives and come straight back at full health. Otherwise, special. Warlock's throne roots him, makes him invulnerable, and raises a shell that bounces sewage back out — including at teammates. Ranger plants his feet, fires a hook at the first thing in front of him and hauls himself to it, detonating any sewage it catches. Druid swallows a nearby ally for 5s: they lose all input and come out healed |
+
+Every ultimate announces itself — a sound, a burst of your colour and a jolt of the screen — and the ones that last keep marking whoever cast them until they run out. The Druid's Devour opens a maw as wide as the ground it eats and whirls it, so the circle it sweeps is the circle it swallows. Cover that the Warlock has made indestructible glows gold, and cover that turns sewage away glows blue.
 
 Dash, attack, and special each show as an arc around your own player, filling as they come off cooldown and glowing while active. The HUD strip above the canvas carries the level number, the level timer, and the current wave.
 
@@ -39,6 +45,8 @@ Surviving the timer clears the level and the next one starts once everybody has 
 A bar across the top of the arena shows how much of the level is left, and the music thins out during a lull and builds back as a wave comes in.
 
 The town sits in the middle of the map with **open ground all the way around it**, and sewage is aimed at the town rather than scattered over the arena. So you have a choice every wave: shelter among the houses, or walk out into the ring and stand in a chunk's path to break it before it lands. Out there you are in the open with nothing to hide behind — the ground is drawn darker so you can see where cover ends.
+
+The storm learns new tricks as the run goes on. From **level 5** a crusted chunk starts arriving that shrugs off the first hit and only breaks on the second — you can see the shell crack once you have got through it. From **level 15** something bigger comes: hit it and it does not die, it becomes two Large, which become four Small, and they are travelling faster than the thing you hit. Seven swings to clear one, and the fragments are the price of every one of them.
 
 Sewage arrives in **waves**: a spawn window, then a lull where nothing new comes in. Chunks already in the air keep flying during a lull, so the arena drains rather than snapping clean — the HUD counts the lull down, and judging when it is actually safe to stand still is the point.
 
@@ -121,7 +129,7 @@ src/server/
   ArenaRoom.ts       fixed-step authoritative loop
   GameState.ts       schema synced to clients
   AsteroidSystem.ts  sewage spawning, movement, and what it hits
-  BossSystem.ts      the Clog and the Wellspring
+  BossSystem.ts      the Clog and the Gullet, including its summoning patterns
   ProjectileSystem.ts  Ranger arrows
   GrappleSystem.ts   hook flight and anchoring; the pull itself is in sim.ts
   SwallowSystem.ts   Druid swallow, passenger parenting, fractional regen
@@ -194,7 +202,7 @@ Colyseus is pinned to 0.15.x. The package is CommonJS and Node's ESM named-expor
 
 ## Debug controls
 
-Shown in the HUD strip above the canvas: fps, rtt, player count, server tick, pending command count, and prediction error in pixels.
+**Press `F3`** to put the diagnostics into the HUD strip: fps, rtt, player count, server tick, pending command count, prediction error in pixels, live sewage and arrow counts, and the state of every toggle below. They are off by default — the strip normally carries only what a player needs (level, score, time, wave, health, lives, whether your pause is spent, and how much of the town is standing).
 
 | Key | Toggle |
 | --- | --- |
@@ -203,7 +211,8 @@ Shown in the HUD strip above the canvas: fps, rtt, player count, server tick, pe
 | `X` | Sewage extrapolation. Off = draw chunks at their last received position, which lags behind the player dodging them. |
 | `R` | **Debug:** refill your health. Removed in M4 when downed/revive is real. |
 | `I` | Interpolation for remote players. Off = 20Hz stepping. |
-| `M` | Mute, music and effects together. Both are synthesized at runtime, so there is nothing to load and nothing to miss. |
+| `M` | Mute, music and effects together — it suspends audio outright rather than turning it down, so nothing keeps running silently in the background. |
+| `F3` | The diagnostics in the HUD strip. |
 | `G` | Server ghost — a white outline at the server's authoritative position for your own player. Gaps mean prediction error. |
 
 ## tuning.json

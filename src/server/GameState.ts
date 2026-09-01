@@ -133,6 +133,16 @@ export class Player extends Schema {
   @type(["string"]) ultimateUpgrades = new ArraySchema<string>();
   @type("boolean") ultReady = false;
   @type("uint16") ultTicks = 0;
+  /**
+   * How many times this player's ultimate has actually fired. Wraps freely — the
+   * client only ever compares it with the previous snapshot's value.
+   *
+   * Synced because nothing else can carry a cast. `ultTicks` stays 0 for the four
+   * instant ultimates, and `ultReady` goes true→false only on the *first* cast,
+   * so an Echo or Rally firing a second time would be invisible to a client
+   * diffing either of them. One byte buys a cast moment for all nine.
+   */
+  @type("uint8") ultCasts = 0;
 
   /** Absolute tick an Echo or Rally fires the effect a second time, 0 for none. */
   ultEchoTick = 0;
@@ -254,6 +264,16 @@ export class Asteroid extends Schema {
   @type("number") vy = 0;
 
   /**
+   * Hits left before it breaks, from the tier at spawn.
+   *
+   * Synced, unlike everything else about a tier, because it is the one thing
+   * that varies per chunk — and because "why didn't that die?" is the first
+   * question the armoured type provokes. The client draws it cracked once this
+   * has dropped below the tier's full value.
+   */
+  @type("uint8") hits = 1;
+
+  /**
    * Server-only, deliberately not decorated so it never goes over the wire.
    * M3 sets this on split children so one melee sweep cannot chain through the
    * fragments it just created.
@@ -262,7 +282,7 @@ export class Asteroid extends Schema {
 }
 
 /**
- * The Clog or the Wellspring.
+ * The Clog or the Gullet.
  *
  * Deliberately its own entity rather than a third asteroid tier. As a chunk it
  * would inherit every "affects all sewage" ability for free, and most of those
@@ -274,7 +294,7 @@ export class Asteroid extends Schema {
  * One at a time, so this is a field rather than a collection.
  */
 export class Boss extends Schema {
-  /** BOSS_NONE when no boss is running; otherwise BOSS_CLOG or BOSS_WELLSPRING. */
+  /** BOSS_NONE when no boss is running; otherwise BOSS_CLOG or BOSS_GULLET. */
   @type("string") kind = "";
   @type("number") x = 0;
   @type("number") y = 0;
@@ -285,7 +305,8 @@ export class Boss extends Schema {
   /** Synced because the client draws the sprite at exactly this, like every
    *  other hitbox in the game. */
   @type("number") radius = 0;
-  /** 0 before the Clog's half-health phase, 1 after. */
+  /** 0 before the half-health phase, 1 after. Both bosses latch it and neither
+   *  clears it — the Gullet can heal back above half and stays enraged. */
   @type("uint8") phase = 0;
   /** The Clog has arrived and started pulling the town down. */
   @type("boolean") razing = false;
@@ -302,7 +323,17 @@ export class Boss extends Schema {
   /** Server-only timers, undecorated so they never go over the wire. */
   shedTimer = 0;
   razeTimer = 0;
-  pumpTimer = 0;
+  /** Absolute tick the Clog last shed from being hit. An absolute tick rather
+   *  than a countdown because damage arrives from outside the boss update, so
+   *  there is no dt to subtract. */
+  hitShedTick = -1e9;
+  /** The Gullet's next summon, which pattern it is on, how far through it is,
+   *  and the bearing the emitter has rotated to. Server-only: the client sees
+   *  the chunks, which is the whole of what a pattern looks like. */
+  summonTimer = 0;
+  patternIndex = 0;
+  patternStep = 0;
+  summonAngle = 0;
 }
 
 /**
@@ -343,8 +374,9 @@ export class GameState extends Schema {
   @type("number") slowFactor = 1;
   /** Absolute tick the slow ends. */
   slowUntilTick = 0;
-  /** Cover cannot be destroyed for the rest of this level (Consecrate). */
-  coverWarded = false;
+  /** Cover cannot be destroyed for the rest of this level (Consecrate). Synced
+   *  so indestructible cover does not look identical to cover about to fall. */
+  @type("boolean") coverWarded = false;
   /** Cover turns sewage away instead of eating it (Spires). Synced so the client
    *  can draw warded cover differently. */
   @type("boolean") coverReflects = false;
@@ -411,7 +443,7 @@ export class GameState extends Schema {
   /**
    * The Dungeon Master's live difficulty slider, 1 being the tuned value.
    *
-   * Scales the Clog's speed and the Wellspring's healing — the one number that
+   * Scales the Clog's speed and the Gullet's healing — the one number that
    * decides how hard each fight is. Read every tick rather than sampled at
    * spawn, so dragging it mid-fight takes effect immediately. Survives a level
    * boundary and a wipe: it is the DM's preference, not run state.
@@ -421,9 +453,9 @@ export class GameState extends Schema {
   /**
    * A level the Dungeon Master has forced the run to jump to next, or 0.
    *
-   * A testing tool: "skip to next boss" arms this, and endLevel honours it in
-   * place of the level that would otherwise come. Synced so the DM's button can
-   * show which level is armed rather than the DM having to remember.
+   * A testing tool: the DM's "skip to level" arms this, and endLevel honours it
+   * in place of the level that would otherwise come. Synced so the DM's panel
+   * can show which level is armed rather than the DM having to remember.
    */
   @type("uint16") forcedNextLevel = 0;
 

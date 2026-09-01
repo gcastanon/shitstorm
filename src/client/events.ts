@@ -29,6 +29,7 @@ export type FxEvent =
   | { kind: "attack"; id: string; x: number; y: number; ranged: boolean; aim: number }
   | { kind: "dash"; id: string; x: number; y: number }
   | { kind: "special"; id: string; x: number; y: number; special: string }
+  | { kind: "ultimate"; id: string; x: number; y: number; ultimate: string }
   | { kind: "waveStart" }
   | { kind: "levelStart"; level: number }
   | { kind: "outcome"; won: boolean };
@@ -42,6 +43,7 @@ interface PrevPlayer {
   attackCd: number;
   hookActive: boolean;
   swallowedCount: number;
+  ultCasts: number;
 }
 
 export class EventDiffer {
@@ -82,6 +84,7 @@ export class EventDiffer {
         attackCd: p.attackCdTicks,
         hookActive: p.hookActive,
         swallowedCount: p.swallowedCount,
+        ultCasts: p.ultCasts,
       });
       if (!was || first) return;
 
@@ -93,6 +96,15 @@ export class EventDiffer {
         else if (p.lifeState === LIFE_ALIVE && was.lifeState === LIFE_DOWNED) {
           out.push({ kind: "playerRevived", x: p.x, y: p.y, self });
         }
+      }
+
+      // Deliberately above the `self` return, unlike every other ability here.
+      // An Echo or Rally fires again seconds later with no input behind it, so
+      // the predictor cannot know about your *own* second cast — only this can.
+      // The scene drops the duplicate for the first cast, which it already drew
+      // from the predictor.
+      if (p.ultCasts !== was.ultCasts) {
+        out.push({ kind: "ultimate", id, x: p.x, y: p.y, ultimate: p.ultimateId });
       }
 
       if (self) return;

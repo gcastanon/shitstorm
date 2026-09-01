@@ -92,7 +92,7 @@ export const UPGRADES: UpgradeDef[] = [
   { id: "vigil", ultimate: "cathedral", name: "Vigil", text: "+4 seconds" },
   { id: "reliquary", ultimate: "cathedral", name: "Reliquary", text: "Allies inside heal to full over the duration" },
 
-  { id: "doubling", ultimate: "reckoning", name: "Doubling", text: "Reversed Large chunks split as they turn" },
+  { id: "doubling", ultimate: "reckoning", name: "Doubling", text: "Reversed chunks break apart as they turn" },
   { id: "unhallowed", ultimate: "reckoning", name: "Unhallowed", text: "Reversed chunks pass through walls" },
   { id: "echo", ultimate: "reckoning", name: "Echo", text: "It happens again three seconds later" },
 
@@ -101,7 +101,7 @@ export const UPGRADES: UpgradeDef[] = [
   { id: "bedrock", ultimate: "consecrate", name: "Bedrock", text: "Cover is rebuilt at the start of every later level too" },
 
   { id: "quiver", ultimate: "arrow-storm", name: "Quiver", text: "Twice the arrows" },
-  { id: "barbed", ultimate: "arrow-storm", name: "Barbed", text: "Arrows destroy Large chunks outright instead of splitting them" },
+  { id: "barbed", ultimate: "arrow-storm", name: "Barbed", text: "Arrows destroy chunks outright instead of breaking them apart" },
   { id: "rally", ultimate: "arrow-storm", name: "Rally", text: "It fires again four seconds later" },
 
   { id: "stillness", ultimate: "slow-storm", name: "Stillness", text: "A tenth speed instead of a quarter" },
@@ -209,6 +209,27 @@ export function ultimateEchoSec(id: string, ups: readonly string[]): number {
 
 export const devourRadiusMul = (ups: readonly string[]) => (has(ups, "gullet") ? 1.6 : 1);
 export const devourHealMul = (ups: readonly string[]) => (has(ups, "feast") ? 2 : 1);
+
+/**
+ * How far Devour reaches, composed in one place.
+ *
+ * Shared for the same reason `throneBubbleRadius` and `cathedralRadiusMul` are:
+ * the client draws the maw at exactly this, and a maw drawn anywhere but where
+ * the server actually eats is worse than no maw at all. The server used to
+ * compose it inline in `tickDevour`, which is precisely how the two would drift.
+ *
+ * The fallback covers a non-melee caster — nothing offers Devour to one today,
+ * but `tickDevour` has always had the branch and deleting it here would move a
+ * decision without meaning to.
+ */
+export function devourReach(
+  atk: { kind: string; reach?: number },
+  playerRadius: number,
+  ups: readonly string[],
+): number {
+  const base = atk.kind === "melee" ? (atk.reach ?? 0) : playerRadius * 4;
+  return base * DEVOUR_REACH_MUL * devourRadiusMul(ups);
+}
 
 /** How long Unhallowed lets reversed sewage ignore walls. */
 export const RECKONING_PHASE_SEC = 3;

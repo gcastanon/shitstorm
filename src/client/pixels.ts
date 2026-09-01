@@ -1,5 +1,5 @@
 import Phaser from "phaser";
-import { BOSS_CLOG, BOSS_WELLSPRING } from "../shared/types";
+import { BOSS_CLOG, BOSS_GULLET } from "../shared/types";
 
 /**
  * The game's art, generated at boot.
@@ -41,6 +41,10 @@ export const TEX = {
   wallRubble: "px-wall-rubble",
   sewageLarge: "px-sewage-l",
   sewageSmall: "px-sewage-s",
+  sewageCrust: "px-sewage-c",
+  /** The armoured one after it has taken a hit and lived. */
+  sewageCrustHit: "px-sewage-ch",
+  sewageBolus: "px-sewage-b",
   arrow: "px-arrow",
   throne: "px-throne",
   body: (c: string) => `px-body-${c}`,
@@ -144,18 +148,26 @@ class Pix {
  * the shine — is clipped to that same disc, so the detail can be as lumpy as it
  * likes without ever claiming a pixel the simulation does not own.
  *
- * `size` is the hitbox diameter in art pixels.
+ * `size` is the hitbox diameter in art pixels. `variant` recolours it and adds
+ * the marks that say what kind it is — a crusted shell for the armoured type, a
+ * heavier lumpier body for the bolus — without moving a single silhouette pixel,
+ * because all four types are still the same disc filled edge to edge.
  */
-function poopTexture(scene: Phaser.Scene, key: string, size: number) {
+type PoopVariant = "plain" | "crust" | "crust-cracked" | "bolus";
+
+function poopTexture(scene: Phaser.Scene, key: string, size: number, variant: PoopVariant = "plain") {
   const p = new Pix(scene, size, size);
   const c = size / 2;
   const r = size / 2;
   const clip = { cx: c, cy: c, r: r - 1 };
 
-  const DARK = 0x40280f;
-  const MID = 0x684021;
-  const LIGHT = 0x8a5a2e;
-  const SHINE = 0xa87b45;
+  const crusted = variant === "crust" || variant === "crust-cracked";
+  // The armoured one is greyer and drier; the bolus is darker and richer. Both
+  // stay recognisably sewage rather than becoming a different substance.
+  const DARK = crusted ? 0x3a3630 : variant === "bolus" ? 0x2e1c09 : 0x40280f;
+  const MID = crusted ? 0x5f584c : variant === "bolus" ? 0x543219 : 0x684021;
+  const LIGHT = crusted ? 0x847a68 : variant === "bolus" ? 0x714425 : 0x8a5a2e;
+  const SHINE = crusted ? 0xa79a83 : variant === "bolus" ? 0x8d5c33 : 0xa87b45;
 
   p.disc(c, c, r, OUTLINE);
   p.disc(c, c, r - 1, DARK);
@@ -173,6 +185,37 @@ function poopTexture(scene: Phaser.Scene, key: string, size: number) {
   // The little peak on top, and a wet highlight.
   p.ellipseIn(c + r * 0.06, c - r * 0.72, r * 0.20, r * 0.20, LIGHT, clip);
   p.ellipseIn(c - r * 0.30, c - r * 0.18, r * 0.18, r * 0.10, SHINE, clip);
+
+  if (crusted) {
+    // A shell of plates around the rim, so "this one is armoured" is legible at
+    // a glance rather than only after the first hit fails to kill it.
+    const PLATE = 0x9a8f7a;
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      p.ellipseIn(
+        c + Math.cos(a) * r * 0.80, c + Math.sin(a) * r * 0.80,
+        r * 0.17, r * 0.17, PLATE, clip,
+      );
+    }
+  }
+
+  if (variant === "crust-cracked") {
+    // Half the shell gone and the sewage showing through, so a chunk that
+    // survived a hit does not look identical to one nobody has touched.
+    const GUT = 0x6b4021;
+    const SPLIT = 0x241a10;
+    p.ellipseIn(c + r * 0.22, c, r * 0.42, r * 0.52, GUT, clip);
+    for (let i = -3; i <= 3; i++) {
+      p.rect(Math.round(c + i * (r * 0.06)), Math.round(c - r * 0.55 + Math.abs(i) * (r * 0.12)), 1, Math.max(1, Math.round(r * 0.5)), SPLIT);
+    }
+  }
+
+  if (variant === "bolus") {
+    // Two lumps inside, which is what it is about to become.
+    p.ellipseIn(c - r * 0.30, c + r * 0.10, r * 0.30, r * 0.30, SHINE, clip);
+    p.ellipseIn(c + r * 0.30, c - r * 0.14, r * 0.26, r * 0.26, SHINE, clip);
+  }
+
   p.bake(key);
 }
 
@@ -181,17 +224,17 @@ function poopTexture(scene: Phaser.Scene, key: string, size: number) {
  * the silhouette cannot drift from what the server hits.
  *
  * The Clog is sewage several times over — the same coils, darker and sicker. The
- * Wellspring is a hole in the ground with something coming out of it, so it gets
- * rings instead of coils and a bright throat that reads at a glance as the thing
- * to point at.
+ * Gullet is a mouth: a ring of teeth around a throat that gets brighter toward
+ * the middle, so the thing everything is being pulled into is also the thing
+ * that most obviously wants shooting.
  */
-function bossTexture(scene: Phaser.Scene, key: string, size: number, wellspring: boolean) {
+function bossTexture(scene: Phaser.Scene, key: string, size: number, gullet: boolean) {
   const p = new Pix(scene, size, size);
   const c = size / 2;
   const r = size / 2;
   const clip = { cx: c, cy: c, r: r - 1 };
 
-  if (!wellspring) {
+  if (!gullet) {
     const DARK = 0x241505;
     const MID = 0x4a2a0e;
     const LIGHT = 0x6b4018;
@@ -215,24 +258,41 @@ function bossTexture(scene: Phaser.Scene, key: string, size: number, wellspring:
     return;
   }
 
-  const RIM = 0x3a2c12;
-  const STONE = 0x55503f;
-  const BROTH = 0x5c6b1f;
-  const HOT = 0x9fbb35;
+  // A mouth, drawn from the outside in: lip, gum, then a throat that brightens
+  // toward the middle so the eye is pulled where the sewage is being pulled.
+  const LIP = 0x4a2536;
+  const GUM = 0x6d2f3f;
+  const THROAT = 0x2a0d16;
+  const DEEP = 0x120409;
+  const BILE = 0x8fae2a;
+  const TOOTH = 0xe8e2cf;
+  const clipTeeth = { cx: c, cy: c, r: r - 1 };
 
   p.disc(c, c, r, OUTLINE);
-  p.disc(c, c, r - 1, STONE);
-  p.disc(c, c, r * 0.82, RIM);
-  p.disc(c, c, r * 0.70, BROTH);
-  p.disc(c, c, r * 0.40, HOT);
-  // Stonework around the mouth, so it reads as built rather than grown.
-  for (let i = 0; i < 8; i++) {
-    const a = (i / 8) * Math.PI * 2;
-    p.rect(
-      Math.round(c + Math.cos(a) * r * 0.90) - 1,
-      Math.round(c + Math.sin(a) * r * 0.90) - 1,
-      3, 3, RIM,
-    );
+  p.disc(c, c, r - 1, LIP);
+  p.disc(c, c, r * 0.88, GUM);
+  p.disc(c, c, r * 0.74, THROAT);
+  p.disc(c, c, r * 0.40, DEEP);
+  // A slick of something still going down.
+  p.ellipseIn(c, c + r * 0.16, r * 0.26, r * 0.13, BILE, clipTeeth);
+
+  /**
+   * Teeth. Each is a stack of shrinking rows walking inward along its own
+   * bearing, which is how you draw a triangle on a pixel grid without any
+   * rotation — a rotated rect would land on half pixels and break the 2px look.
+   *
+   * Drawn through ellipseIn so every tooth is clipped inside the collision
+   * radius. Decoration may look smaller than the hitbox, never bigger.
+   */
+  const TEETH = 14;
+  for (let i = 0; i < TEETH; i++) {
+    const a = (i / TEETH) * Math.PI * 2;
+    const ca = Math.cos(a), sa = Math.sin(a);
+    for (let step = 0; step < 5; step++) {
+      const rad = r * 0.86 - step * (r * 0.115);
+      const half = Math.max(0.6, r * (0.075 - step * 0.014));
+      p.ellipseIn(c + ca * rad, c + sa * rad, half, half, TOOTH, clipTeeth);
+    }
   }
   p.bake(key);
 }
@@ -564,8 +624,10 @@ export function bakeAll(
     wall: { w: number; h: number };
     sewageLarge: number;
     sewageSmall: number;
+    sewageCrust: number;
+    sewageBolus: number;
     bossClog: number;
-    bossWellspring: number;
+    bossGullet: number;
   },
 ) {
   const art = (world: number) => Math.round(world / PIXEL);
@@ -582,9 +644,12 @@ export function bakeAll(
 
   poopTexture(scene, TEX.sewageLarge, art(sizes.sewageLarge));
   poopTexture(scene, TEX.sewageSmall, art(sizes.sewageSmall));
+  poopTexture(scene, TEX.sewageCrust, art(sizes.sewageCrust), "crust");
+  poopTexture(scene, TEX.sewageCrustHit, art(sizes.sewageCrust), "crust-cracked");
+  poopTexture(scene, TEX.sewageBolus, art(sizes.sewageBolus), "bolus");
 
   bossTexture(scene, TEX.boss(BOSS_CLOG), art(sizes.bossClog), false);
-  bossTexture(scene, TEX.boss(BOSS_WELLSPRING), art(sizes.bossWellspring), true);
+  bossTexture(scene, TEX.boss(BOSS_GULLET), art(sizes.bossGullet), true);
 
   bakeFont(scene);
 

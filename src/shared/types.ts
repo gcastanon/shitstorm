@@ -51,7 +51,14 @@ export const OUTCOME_VICTORY = 5;
  */
 export const BOSS_NONE = "";
 export const BOSS_CLOG = "clog";
-export const BOSS_WELLSPRING = "wellspring";
+/**
+ * The Gullet, level 20.
+ *
+ * Not to be confused with the `gullet` *upgrade* id in `ultimates.ts`, which
+ * widens Devour's radius. Different namespaces — an upgrade id is never compared
+ * against a boss kind — but grepping for the word finds both.
+ */
+export const BOSS_GULLET = "gullet";
 
 /** Button bitmask. Settled in M0 so M3 could add abilities without touching the wire format. */
 export const BTN = {

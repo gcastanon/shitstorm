@@ -151,7 +151,10 @@ export const PERKS: PerkDef[] = [
     apply: (m) => { m.dashInvuln = true; } },
   { id: "reach", name: "Reach", text: "+25% melee reach and arrow range",
     apply: (m) => { m.reachMul *= 1.25; } },
-  { id: "demolition", name: "Demolition", text: "Attacks destroy Large sewage instead of splitting it", flag: true,
+  // The code has always removed whatever it hit, whatever the tier; the text
+  // said "Large" and only became actually wrong once armoured and splitting
+  // chunks existed for it to shortcut.
+  { id: "demolition", name: "Demolition", text: "Attacks destroy sewage outright instead of breaking it apart", flag: true,
     apply: (m) => { m.destroyLarge = true; } },
   { id: "regrowth", name: "Regrowth", text: "Regain 2 health per second",
     apply: (m) => { m.regenAdd += 2; } },
